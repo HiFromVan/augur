@@ -35,12 +35,20 @@ wheels/
 models/*.cbm
 models/*.pkl
 models/*.pt
+models/*.json
 
 # 数据
 *.db
 *.duckdb
 data/*.csv
 data/*.parquet
+
+# 缓存
+.soccerdata/
+catboost_info/
+
+# macOS
+.DS_Store
 
 # 日志
 *.log
