@@ -45,7 +45,7 @@ def parse_float(val) -> Optional[float]:
 def parse_match_time(time_str: str, season_name: str) -> Optional[datetime]:
     try:
         # Full datetime: "2024-08-17 03:00:00" or "2024-08-17 03:00"
-        if len(time_str) >= 16 and time_str[4] == '-':
+        if len(time_str) >= 16 and   time_str[4] == '-':
             return datetime.strptime(time_str[:16], '%Y-%m-%d %H:%M')
         # Short format: "08-17 03:00" — infer year from season e.g. "2024-2025"
         parts = season_name.split('-')

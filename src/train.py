@@ -311,7 +311,7 @@ async def main():
     for name, imp in sorted(zip(feature_names, importances), key=lambda x: -x[1])[:10]:
         print(f"  {name}: {imp:.2f}")
 
-    # 保存模型
+    # 保存分类模型
     os.makedirs(MODEL_DIR, exist_ok=True)
     model_path = os.path.join(MODEL_DIR, "catboost_v1.cbm")
     model.save_model(model_path)
@@ -324,9 +324,111 @@ async def main():
     with open(os.path.join(MODEL_DIR, "pi_ratings_v1.json"), "w") as f:
         json.dump(pi_serializable, f)
 
-    print(f"\nModel saved to {model_path}")
+    print(f"\nClassification model saved to {model_path}")
     print(f"Pi-Ratings saved ({len(pi_ratings)} teams)")
     print(f"Feature names saved")
+
+    # ========== 训练泊松回归模型（预测进球数） ==========
+    print("\n" + "=" * 50)
+    print("Training Poisson Regression Models for Score Prediction")
+    print("=" * 50)
+
+    # 重新构建数据，这次包含进球数
+    X_goals_train = []
+    X_goals_test = []
+    y_home_train = []
+    y_away_train = []
+    y_home_test = []
+    y_away_test = []
+
+    for match in all_matches:
+        features = engineer.extract_features(
+            match['home_team'],
+            match['away_team'],
+            match['league'],
+            match['date'],
+            pi_ratings,
+            team_index,
+            h2h_index
+        )
+
+        if features is None:
+            continue
+
+        home_goals = float(match['home_goals'])
+        away_goals = float(match['away_goals'])
+
+        if match['date'] < split_date:
+            X_goals_train.append(features)
+            y_home_train.append(home_goals)
+            y_away_train.append(away_goals)
+        else:
+            X_goals_test.append(features)
+            y_home_test.append(home_goals)
+            y_away_test.append(away_goals)
+
+    print(f"\nGoals prediction - Train: {len(X_goals_train)}, Test: {len(X_goals_test)}")
+
+    # 转成 numpy
+    X_goals_train_arr = np.array([[f.get(k, 0.0) for k in feature_names] for f in X_goals_train])
+    X_goals_test_arr = np.array([[f.get(k, 0.0) for k in feature_names] for f in X_goals_test])
+    y_home_train_arr = np.array(y_home_train)
+    y_away_train_arr = np.array(y_away_train)
+    y_home_test_arr = np.array(y_home_test)
+    y_away_test_arr = np.array(y_away_test)
+
+    # 训练主队进球模型
+    from catboost import CatBoostRegressor
+
+    print("\n=== Training Home Goals Model ===")
+    home_goals_pool_train = Pool(X_goals_train_arr, y_home_train_arr)
+    home_goals_pool_test = Pool(X_goals_test_arr, y_home_test_arr)
+
+    home_model = CatBoostRegressor(
+        iterations=1000,
+        learning_rate=0.05,
+        depth=6,
+        loss_function='RMSE',
+        eval_metric='RMSE',
+        early_stopping_rounds=50,
+        verbose=100,
+        task_type='CPU',
+    )
+    home_model.fit(home_goals_pool_train, eval_set=home_goals_pool_test)
+
+    home_train_rmse = np.sqrt(np.mean((home_model.predict(X_goals_train_arr) - y_home_train_arr) ** 2))
+    home_test_rmse = np.sqrt(np.mean((home_model.predict(X_goals_test_arr) - y_home_test_arr) ** 2))
+    print(f"Home Goals - Train RMSE: {home_train_rmse:.4f}, Test RMSE: {home_test_rmse:.4f}")
+
+    # 训练客队进球模型
+    print("\n=== Training Away Goals Model ===")
+    away_goals_pool_train = Pool(X_goals_train_arr, y_away_train_arr)
+    away_goals_pool_test = Pool(X_goals_test_arr, y_away_test_arr)
+
+    away_model = CatBoostRegressor(
+        iterations=1000,
+        learning_rate=0.05,
+        depth=6,
+        loss_function='RMSE',
+        eval_metric='RMSE',
+        early_stopping_rounds=50,
+        verbose=100,
+        task_type='CPU',
+    )
+    away_model.fit(away_goals_pool_train, eval_set=away_goals_pool_test)
+
+    away_train_rmse = np.sqrt(np.mean((away_model.predict(X_goals_train_arr) - y_away_train_arr) ** 2))
+    away_test_rmse = np.sqrt(np.mean((away_model.predict(X_goals_test_arr) - y_away_test_arr) ** 2))
+    print(f"Away Goals - Train RMSE: {away_train_rmse:.4f}, Test RMSE: {away_test_rmse:.4f}")
+
+    # 保存进球预测模型
+    home_model_path = os.path.join(MODEL_DIR, "home_goals_v1.cbm")
+    away_model_path = os.path.join(MODEL_DIR, "away_goals_v1.cbm")
+    home_model.save_model(home_model_path)
+    away_model.save_model(away_model_path)
+
+    print(f"\nHome goals model saved to {home_model_path}")
+    print(f"Away goals model saved to {away_model_path}")
 
     await db.disconnect()
 
