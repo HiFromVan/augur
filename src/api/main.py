@@ -14,13 +14,18 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 import asyncio
 import asyncpg
-from fastapi import FastAPI, Query
+from fastapi import FastAPI, Query, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 import httpx
 from bs4 import BeautifulSoup
 import numpy as np
+import bcrypt
+import secrets
+import anthropic
+
+from src.api.score_predictor import predict_score_from_models, predict_score_baseline
 
 # ============ 配置 ============
 
@@ -31,8 +36,14 @@ DATABASE_URL = os.getenv(
 
 MODEL_DIR = Path(PROJECT_ROOT) / "models"
 MODEL_PATH = str(MODEL_DIR / "catboost_v1.cbm")
+HOME_GOALS_MODEL_PATH = str(MODEL_DIR / "home_goals_v1.cbm")
+AWAY_GOALS_MODEL_PATH = str(MODEL_DIR / "away_goals_v1.cbm")
 FEATURES_PATH = str(MODEL_DIR / "features_v1.json")
 PI_RATINGS_PATH = str(MODEL_DIR / "pi_ratings_v1.json")
+
+# Anthropic API
+ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
+anthropic_client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY) if ANTHROPIC_API_KEY else None
 
 # ============ Pydantic 模型 ============
 
@@ -69,6 +80,12 @@ class MatchPrediction(BaseModel):
     value_away: float
     has_value: bool
 
+    # 比分预测
+    pred_score_home: Optional[int] = None
+    pred_score_away: Optional[int] = None
+    expected_goals_home: Optional[float] = None
+    expected_goals_away: Optional[float] = None
+
     model_name: str
 
 
@@ -78,9 +95,94 @@ class PredictResponse(BaseModel):
     source: str
 
 
+class RegisterRequest(BaseModel):
+    phone: str
+    password: str
+
+
+class LoginRequest(BaseModel):
+    phone: str
+    password: str
+
+
+class AuthResponse(BaseModel):
+    success: bool
+    message: str
+    user: Optional[dict] = None
+    token: Optional[str] = None
+
+
+class SubscriptionStatus(BaseModel):
+    has_access: bool
+    subscription_type: str  # 'trial', 'paid', 'expired', 'basic_yearly', 'premium_yearly'
+    plan_name: str  # 套餐名称
+    expires_at: Optional[str] = None
+    days_remaining: Optional[int] = None
+
+
+class SubscriptionPlan(BaseModel):
+    plan_code: str
+    name: str
+    price: int  # 价格（分）
+    duration_days: int
+    description: str
+
+
+class SubscriptionPlansResponse(BaseModel):
+    plans: List[SubscriptionPlan]
+
+
+class AccuracyStats(BaseModel):
+    total_predictions: int
+    correct_predictions: int
+    accuracy_percentage: float
+    avg_rps: float
+    exact_score_matches: int
+    avg_score_diff: float
+
+
+class RecentPrediction(BaseModel):
+    match_id: int
+    date: str
+    league: str
+    home_team: str
+    away_team: str
+    pred_home: float
+    pred_draw: float
+    pred_away: float
+    pred_score_home: Optional[int]
+    pred_score_away: Optional[int]
+    actual_home: Optional[int]
+    actual_away: Optional[int]
+    is_correct: Optional[bool]
+    rps_score: Optional[float]
+
+
+class ChatMessage(BaseModel):
+    role: str
+    content: str
+
+
+class ChatRequest(BaseModel):
+    message: str
+    match_id: Optional[int] = None
+    match_context: Optional[Dict[str, Any]] = None
+    history: List[ChatMessage] = []
+
+
+class ChatResponse(BaseModel):
+    response: str
+    sources: Optional[List[str]] = None
+
+
 # ============ 数据库 ============
 
 pool: Optional[asyncpg.Pool] = None
+
+# 缓存
+prediction_cache: Optional[dict] = None
+cache_timestamp: Optional[datetime] = None
+CACHE_DURATION_MINUTES = 10  # 缓存10分钟
 
 
 async def get_pool() -> asyncpg.Pool:
@@ -427,13 +529,15 @@ async def scrape_fivehundred(target_date: date) -> List[dict]:
 
 
 catboost_model = None
+poisson_home_model = None
+poisson_away_model = None
 feature_names: list = []
 pi_ratings_cache: dict = {}
 
 
 def load_assets():
     """加载模型 + 特征名 + Pi-Ratings（全局缓存）"""
-    global catboost_model, feature_names, pi_ratings_cache
+    global catboost_model, poisson_home_model, poisson_away_model, feature_names, pi_ratings_cache
 
     # 加载 Pi-Ratings（训练时保存的）
     if not pi_ratings_cache and os.path.exists(PI_RATINGS_PATH):
@@ -449,22 +553,36 @@ def load_assets():
             feature_names = json.load(f)
         print(f"Loaded {len(feature_names)} feature names")
 
-    if catboost_model is not None:
-        return catboost_model
+    # 加载分类模型
+    if catboost_model is None and os.path.exists(MODEL_PATH):
+        try:
+            from catboost import CatBoostClassifier
+            catboost_model = CatBoostClassifier()
+            catboost_model.load_model(MODEL_PATH)
+            print(f"Loaded CatBoost classification model: {MODEL_PATH}")
+        except Exception as e:
+            print(f"Failed to load classification model: {e}")
 
-    if not os.path.exists(MODEL_PATH):
-        print(f"Model not found, using baseline")
-        return None
+    # 加载泊松回归模型
+    if poisson_home_model is None and os.path.exists(HOME_GOALS_MODEL_PATH):
+        try:
+            from catboost import CatBoostRegressor
+            poisson_home_model = CatBoostRegressor()
+            poisson_home_model.load_model(HOME_GOALS_MODEL_PATH)
+            print(f"Loaded home goals model: {HOME_GOALS_MODEL_PATH}")
+        except Exception as e:
+            print(f"Failed to load home goals model: {e}")
 
-    try:
-        from catboost import CatBoostClassifier
-        catboost_model = CatBoostClassifier()
-        catboost_model.load_model(MODEL_PATH)
-        print(f"Loaded CatBoost model: {MODEL_PATH}")
-        return catboost_model
-    except Exception as e:
-        print(f"Failed to load model: {e}")
-        return None
+    if poisson_away_model is None and os.path.exists(AWAY_GOALS_MODEL_PATH):
+        try:
+            from catboost import CatBoostRegressor
+            poisson_away_model = CatBoostRegressor()
+            poisson_away_model.load_model(AWAY_GOALS_MODEL_PATH)
+            print(f"Loaded away goals model: {AWAY_GOALS_MODEL_PATH}")
+        except Exception as e:
+            print(f"Failed to load away goals model: {e}")
+
+    return catboost_model
 
 
 def predict_proba(features: dict, match: dict) -> dict:
@@ -519,8 +637,17 @@ async def health():
 @app.get("/api/predict", response_model=PredictResponse)
 async def predict_today():
     """
-    获取今日比赛 + 模型预测 + 价值信号
+    获取今日比赛 + 模型预测 + 价值信号（带缓存）
     """
+    global prediction_cache, cache_timestamp
+
+    # 检查缓存是否有效
+    now = datetime.now()
+    if prediction_cache and cache_timestamp:
+        cache_age = (now - cache_timestamp).total_seconds() / 60
+        if cache_age < CACHE_DURATION_MINUTES:
+            return prediction_cache
+
     load_assets()  # 确保模型已加载
 
     today = date.today()
@@ -529,11 +656,41 @@ async def predict_today():
     raw_matches = await scrape_fivehundred(today)
 
     if not raw_matches:
-        return PredictResponse(matches=[], fetched_at=datetime.now().isoformat(), source="fivehundred")
+        result = PredictResponse(matches=[], fetched_at=datetime.now().isoformat(), source="fivehundred")
+        prediction_cache = result
+        cache_timestamp = now
+        return result
 
     # 2. 获取历史比赛用于计算特征
     hist_matches = await fetch_historical_matches(limit=500)
     model_name = "catboost_v1" if catboost_model else "pi_baseline"
+
+    # 查数据库中对应的真实 id（先 upsert 今日比赛，再查）
+    p = await get_pool()
+    async with p.acquire() as conn:
+        for m in raw_matches:
+            await conn.execute("""
+                INSERT INTO matches (date, league, home_team, away_team, odds_home, odds_draw, odds_away, source)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                ON CONFLICT (date, home_team, away_team, source) DO UPDATE
+                  SET odds_home = EXCLUDED.odds_home,
+                      odds_draw = EXCLUDED.odds_draw,
+                      odds_away = EXCLUDED.odds_away
+            """,
+                datetime.fromisoformat(m['date']),
+                m.get('league', ''),
+                m['home_team'],
+                m['away_team'],
+                m['odds_home'],
+                m['odds_draw'],
+                m['odds_away'],
+                'fivehundred',
+            )
+        db_rows = await conn.fetch("""
+            SELECT id, home_team, away_team FROM matches
+            WHERE date::date = $1
+        """, today)
+    db_id_map = {(r['home_team'], r['away_team']): r['id'] for r in db_rows}
 
     # 3. 预测 + Value 信号
     predictions = []
@@ -552,14 +709,21 @@ async def predict_today():
         features = build_features(m, hist_matches)
         pred = predict_proba(features, m)
 
+        # 比分预测
+        pred_score_home, pred_score_away, exp_home, exp_away = predict_score_from_models(
+            poisson_home_model, poisson_away_model, features, feature_names
+        )
+
         # 价值信号
         value_home = pred['home'] - implied_home
         value_draw = pred['draw'] - implied_draw
         value_away = pred['away'] - implied_away
         has_value = value_home > 0.03 or value_draw > 0.03 or value_away > 0.03
 
+        match_id = db_id_map.get((m['home_team'], m['away_team']), m['id'])
+
         predictions.append(MatchPrediction(
-            id=m['id'],
+            id=match_id,
             date=m['date'],
             league=m.get('league', ''),
             league_cn=m['league_cn'],
@@ -582,14 +746,41 @@ async def predict_today():
             value_draw=round(value_draw, 4),
             value_away=round(value_away, 4),
             has_value=has_value,
+            pred_score_home=pred_score_home,
+            pred_score_away=pred_score_away,
+            expected_goals_home=round(exp_home, 2),
+            expected_goals_away=round(exp_away, 2),
             model_name=model_name,
         ))
 
-    return PredictResponse(
+        # 保存预测记录到数据库（用于后续准确率统计）
+        try:
+            await save_prediction_record(
+                match_id=match_id,
+                pred_home=pred['home'],
+                pred_draw=pred['draw'],
+                pred_away=pred['away'],
+                pred_score_home=pred_score_home,
+                pred_score_away=pred_score_away,
+                expected_goals_home=exp_home,
+                expected_goals_away=exp_away,
+                model_name=model_name
+            )
+        except Exception as e:
+            # 记录失败不影响预测返回
+            print(f"Failed to save prediction record: {e}")
+
+    result = PredictResponse(
         matches=predictions,
         fetched_at=datetime.now().isoformat(),
         source="fivehundred"
     )
+
+    # 更新缓存
+    prediction_cache = result
+    cache_timestamp = now
+
+    return result
 
 
 @app.get("/api/predict/date/{date_str}")
@@ -785,6 +976,519 @@ async def match_detail(match_id: int):
             "away_form": away_form,
             "media": None,  # 预留：大模型媒体分析
         }
+
+
+# ============ 用户认证 API ============
+
+@app.get("/api/matches", response_model=PredictResponse)
+async def get_matches():
+    """获取比赛列表（别名接口，调用 predict_today）"""
+    return await predict_today()
+
+
+@app.post("/api/auth/register", response_model=AuthResponse)
+async def register(req: RegisterRequest):
+    """用户注册"""
+    # 验证手机号格式
+    if not req.phone or len(req.phone) != 11 or not req.phone.isdigit():
+        raise HTTPException(status_code=400, detail="手机号必须为11位数字")
+
+    # 验证密码
+    if not req.password or len(req.password) < 6:
+        raise HTTPException(status_code=400, detail="密码至少6位")
+
+    pool = await get_pool()
+
+    # 检查手机号是否已存在
+    async with pool.acquire() as conn:
+        existing = await conn.fetchrow("SELECT id FROM users WHERE phone = $1", req.phone)
+        if existing:
+            raise HTTPException(status_code=400, detail="手机号已注册")
+
+        # 密码加密
+        password_hash = bcrypt.hashpw(req.password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
+
+        # 生成默认用户名
+        name = f"用户{req.phone[-4:]}"
+
+        # 插入用户
+        user_id = await conn.fetchval(
+            """
+            INSERT INTO users (phone, password_hash, name)
+            VALUES ($1, $2, $3)
+            RETURNING id
+            """,
+            req.phone, password_hash, name
+        )
+
+        # 自动创建高级档订阅（一年有效期）
+        from datetime import datetime, timedelta
+        end_date = datetime.now() + timedelta(days=365)
+
+        await conn.execute(
+            """
+            INSERT INTO subscriptions (user_id, plan_code, amount, status, start_date, end_date)
+            VALUES ($1, 'premium_yearly', 239900, 'active', NOW(), $2)
+            """,
+            user_id, end_date
+        )
+
+        # 生成token
+        token = secrets.token_urlsafe(32)
+
+        # 更新用户token
+        await conn.execute(
+            "UPDATE users SET token = $1 WHERE id = $2",
+            token, user_id
+        )
+
+        return AuthResponse(
+            success=True,
+            message="注册成功",
+            user={
+                "id": user_id,
+                "phone": req.phone,
+                "name": name,
+                "avatar": None
+            },
+            token=token
+        )
+
+
+@app.post("/api/auth/login", response_model=AuthResponse)
+async def login(req: LoginRequest):
+    """用户登录"""
+    # 验证手机号格式
+    if not req.phone or len(req.phone) != 11 or not req.phone.isdigit():
+        raise HTTPException(status_code=400, detail="手机号必须为11位数字")
+
+    pool = await get_pool()
+
+    async with pool.acquire() as conn:
+        user = await conn.fetchrow(
+            "SELECT id, phone, password_hash, name, avatar FROM users WHERE phone = $1",
+            req.phone
+        )
+
+        if not user:
+            raise HTTPException(status_code=401, detail="手机号或密码错误")
+
+        # 验证密码
+        if not bcrypt.checkpw(req.password.encode('utf-8'), user['password_hash'].encode('utf-8')):
+            raise HTTPException(status_code=401, detail="手机号或密码错误")
+
+        # 生成token
+        token = secrets.token_urlsafe(32)
+
+        return AuthResponse(
+            success=True,
+            message="登录成功",
+            user={
+                "id": user['id'],
+                "phone": user['phone'],
+                "name": user['name'],
+                "avatar": user['avatar']
+            },
+            token=token
+        )
+
+
+# ============ 订阅系统 API ============
+
+async def check_subscription_status(user_id: int) -> dict:
+    """检查用户订阅状态"""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        # 查询用户的有效订阅
+        subscription = await conn.fetchrow(
+            """
+            SELECT s.plan_code, s.end_date, sp.name
+            FROM subscriptions s
+            JOIN subscription_plans sp ON sp.plan_code = s.plan_code
+            WHERE s.user_id = $1
+              AND s.status = 'active'
+              AND s.end_date > NOW()
+            ORDER BY s.end_date DESC
+            LIMIT 1
+            """,
+            user_id
+        )
+
+        if subscription:
+            expires_at = subscription['end_date']
+            days_remaining = (expires_at - datetime.now()).days
+
+            return {
+                "has_access": True,
+                "subscription_type": subscription['plan_code'],
+                "plan_name": subscription['name'],
+                "expires_at": expires_at.isoformat() if expires_at else None,
+                "days_remaining": max(0, days_remaining)
+            }
+
+        # 检查试用期
+        user = await conn.fetchrow(
+            "SELECT trial_end FROM users WHERE id = $1",
+            user_id
+        )
+
+        if user and user['trial_end'] and user['trial_end'] > datetime.now():
+            expires_at = user['trial_end']
+            days_remaining = (expires_at - datetime.now()).days
+
+            return {
+                "has_access": True,
+                "subscription_type": "trial",
+                "plan_name": "试用期",
+                "expires_at": expires_at.isoformat() if expires_at else None,
+                "days_remaining": max(0, days_remaining)
+            }
+
+        # 无有效订阅
+        return {
+            "has_access": False,
+            "subscription_type": "expired",
+            "plan_name": "已过期",
+            "expires_at": None,
+            "days_remaining": 0
+        }
+
+
+@app.get("/api/subscription/status", response_model=SubscriptionStatus)
+async def get_subscription_status(token: str = Query(...)):
+    """获取用户订阅状态"""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        user = await conn.fetchrow("SELECT id FROM users WHERE token = $1", token)
+        if not user:
+            raise HTTPException(status_code=401, detail="未登录")
+
+        status = await check_subscription_status(user['id'])
+        return SubscriptionStatus(**status)
+
+
+@app.get("/api/subscription/plans", response_model=SubscriptionPlansResponse)
+async def get_subscription_plans():
+    """获取订阅套餐列表"""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT plan_code, name, price, duration_days, description
+            FROM subscription_plans
+            WHERE is_active = true
+            ORDER BY duration_days
+            """
+        )
+
+        plans = [
+            SubscriptionPlan(
+                plan_code=row['plan_code'],
+                name=row['name'],
+                price=row['price'],
+                duration_days=row['duration_days'],
+                description=row['description']
+            )
+            for row in rows
+        ]
+
+        return SubscriptionPlansResponse(plans=plans)
+
+
+# ============ 预测准确率 API ============
+
+async def save_prediction_record(
+    match_id: int,
+    pred_home: float,
+    pred_draw: float,
+    pred_away: float,
+    pred_score_home: Optional[int],
+    pred_score_away: Optional[int],
+    expected_goals_home: Optional[float],
+    expected_goals_away: Optional[float],
+    model_name: str = "catboost_v1"
+):
+    """保存预测记录到数据库"""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        # 检查是否已存在该比赛的预测记录
+        existing = await conn.fetchrow(
+            "SELECT id FROM prediction_records WHERE match_id = $1 AND evaluated_at IS NULL",
+            match_id
+        )
+
+        if existing:
+            # 更新现有记录
+            await conn.execute(
+                """
+                UPDATE prediction_records
+                SET pred_home = $2, pred_draw = $3, pred_away = $4,
+                    pred_score_home = $5, pred_score_away = $6,
+                    expected_goals_home = $7, expected_goals_away = $8,
+                    model_name = $9, predicted_at = NOW()
+                WHERE id = $1
+                """,
+                existing['id'], pred_home, pred_draw, pred_away,
+                pred_score_home, pred_score_away,
+                expected_goals_home, expected_goals_away, model_name
+            )
+        else:
+            # 插入新记录
+            await conn.execute(
+                """
+                INSERT INTO prediction_records (
+                    match_id, pred_home, pred_draw, pred_away,
+                    pred_score_home, pred_score_away,
+                    expected_goals_home, expected_goals_away,
+                    model_name
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                """,
+                match_id, pred_home, pred_draw, pred_away,
+                pred_score_home, pred_score_away,
+                expected_goals_home, expected_goals_away, model_name
+            )
+
+
+@app.get("/api/stats/accuracy", response_model=AccuracyStats)
+async def get_accuracy_stats():
+    """获取整体预测准确率统计"""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        stats = await conn.fetchrow("SELECT * FROM prediction_accuracy_stats")
+
+        if not stats or stats['total_predictions'] == 0:
+            return AccuracyStats(
+                total_predictions=0,
+                correct_predictions=0,
+                accuracy_percentage=0.0,
+                avg_rps=0.0,
+                exact_score_matches=0,
+                avg_score_diff=0.0
+            )
+
+        return AccuracyStats(
+            total_predictions=stats['total_predictions'],
+            correct_predictions=stats['correct_predictions'],
+            accuracy_percentage=float(stats['accuracy_percentage']),
+            avg_rps=float(stats['avg_rps']),
+            exact_score_matches=stats['exact_score_matches'],
+            avg_score_diff=float(stats['avg_score_diff'])
+        )
+
+
+@app.get("/api/stats/recent-predictions")
+async def get_recent_predictions(limit: int = Query(10, ge=1, le=50)):
+    """获取最近的预测记录"""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT
+                pr.match_id,
+                m.date,
+                m.league,
+                m.home_team,
+                m.away_team,
+                pr.pred_home,
+                pr.pred_draw,
+                pr.pred_away,
+                pr.pred_score_home,
+                pr.pred_score_away,
+                pr.actual_home,
+                pr.actual_away,
+                pr.is_correct,
+                pr.rps_score
+            FROM prediction_records pr
+            JOIN matches m ON pr.match_id = m.id
+            WHERE pr.evaluated_at IS NOT NULL
+            ORDER BY pr.evaluated_at DESC
+            LIMIT $1
+            """,
+            limit
+        )
+
+        predictions = []
+        for row in rows:
+            predictions.append(RecentPrediction(
+                match_id=row['match_id'],
+                date=row['date'].isoformat() if row['date'] else "",
+                league=row['league'],
+                home_team=row['home_team'],
+                away_team=row['away_team'],
+                pred_home=float(row['pred_home']),
+                pred_draw=float(row['pred_draw']),
+                pred_away=float(row['pred_away']),
+                pred_score_home=row['pred_score_home'],
+                pred_score_away=row['pred_score_away'],
+                actual_home=row['actual_home'],
+                actual_away=row['actual_away'],
+                is_correct=row['is_correct'],
+                rps_score=float(row['rps_score']) if row['rps_score'] else None
+            ))
+
+        return predictions
+
+
+@app.post("/api/stats/evaluate-matches")
+async def evaluate_completed_matches():
+    """评估已完成的比赛预测"""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        # 获取所有已完成但未评估的比赛
+        matches = await conn.fetch(
+            """
+            SELECT DISTINCT pr.match_id
+            FROM prediction_records pr
+            JOIN matches m ON pr.match_id = m.id
+            WHERE pr.evaluated_at IS NULL
+            AND m.home_goals IS NOT NULL
+            AND m.away_goals IS NOT NULL
+            """
+        )
+
+        evaluated_count = 0
+        for match in matches:
+            await conn.execute(
+                "SELECT evaluate_prediction($1)",
+                match['match_id']
+            )
+            evaluated_count += 1
+
+        return {"evaluated": evaluated_count, "message": f"已评估 {evaluated_count} 场比赛"}
+
+
+# ============ AI 聊天 API ============
+
+async def get_match_context(match_id: int) -> Dict[str, Any]:
+    """获取比赛的详细上下文信息"""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        match = await conn.fetchrow(
+            """
+            SELECT
+                m.*,
+                (SELECT json_agg(json_build_object(
+                    'date', date, 'opponent', opponent, 'result', result,
+                    'goals_for', goals_for, 'goals_against', goals_against
+                )) FROM (
+                    SELECT * FROM team_form
+                    WHERE team_name = m.home_team
+                    ORDER BY date DESC LIMIT 5
+                ) sub) as home_form,
+                (SELECT json_agg(json_build_object(
+                    'date', date, 'opponent', opponent, 'result', result,
+                    'goals_for', goals_for, 'goals_against', goals_against
+                )) FROM (
+                    SELECT * FROM team_form
+                    WHERE team_name = m.away_team
+                    ORDER BY date DESC LIMIT 5
+                ) sub) as away_form
+            FROM matches m
+            WHERE m.id = $1
+            """,
+            match_id
+        )
+
+        if not match:
+            return {}
+
+        return dict(match)
+
+
+@app.post("/api/chat", response_model=ChatResponse)
+async def chat_with_ai(request: ChatRequest, token: str = Header(None)):
+    """AI 聊天接口 - 支持足球预测分析（仅高级档用户）"""
+
+    if not anthropic_client:
+        raise HTTPException(status_code=503, detail="AI服务未配置")
+
+    # 验证用户权限
+    if token:
+        pool = await get_pool()
+        async with pool.acquire() as conn:
+            user = await conn.fetchrow("SELECT id FROM users WHERE token = $1", token)
+            if user:
+                # 检查用户是否有 ai_chat 权限
+                has_feature = await conn.fetchval(
+                    "SELECT check_user_feature($1, $2)",
+                    user['id'], 'ai_chat'
+                )
+                if not has_feature:
+                    raise HTTPException(
+                        status_code=403,
+                        detail="AI 对话功能仅限高级档会员使用，请升级到高级档以解锁此功能"
+                    )
+
+    try:
+        # 构建系统提示词
+        system_prompt = """你是一个专业的足球数据分析师和预测专家。你的任务是帮助用户理解足球比赛预测。
+
+你的专长包括：
+- 解释预测模型的工作原理
+- 分析球队的历史表现和近期状态
+- 解读统计数据和概率
+- 提供基于数据的洞察
+
+回答时请：
+- 使用简洁、专业但易懂的语言
+- 引用具体的数据和统计信息
+- 保持客观，承认预测的不确定性
+- 用中文回答"""
+
+        # 如果有比赛上下文，添加到系统提示词
+        if request.match_context:
+            ctx = request.match_context
+            system_prompt += f"""
+
+当前比赛信息：
+- 主队：{ctx.get('homeTeam', 'N/A')}
+- 客队：{ctx.get('awayTeam', 'N/A')}
+- 联赛：{ctx.get('league', 'N/A')}
+- 预测概率：主胜 {ctx.get('predHome', 0)*100:.1f}%，平局 {ctx.get('predDraw', 0)*100:.1f}%，客胜 {ctx.get('predAway', 0)*100:.1f}%"""
+
+        # 如果有match_id，获取更详细的上下文
+        if request.match_id:
+            match_data = await get_match_context(request.match_id)
+            if match_data:
+                system_prompt += f"""
+
+详细比赛数据：
+- 比赛时间：{match_data.get('date', 'N/A')}
+- 主队近期战绩：{match_data.get('home_form', [])}
+- 客队近期战绩：{match_data.get('away_form', [])}"""
+
+        # 构建消息历史
+        messages = []
+        for msg in request.history[-5:]:  # 只保留最近5条
+            messages.append({
+                "role": msg.role,
+                "content": msg.content
+            })
+
+        # 添加当前用户消息
+        messages.append({
+            "role": "user",
+            "content": request.message
+        })
+
+        # 调用 Claude API
+        response = anthropic_client.messages.create(
+            model="claude-3-5-haiku-20241022",
+            max_tokens=1024,
+            system=system_prompt,
+            messages=messages
+        )
+
+        assistant_message = response.content[0].text
+
+        return ChatResponse(
+            response=assistant_message,
+            sources=None
+        )
+
+    except Exception as e:
+        print(f"Chat error: {e}")
+        raise HTTPException(status_code=500, detail=f"AI服务错误: {str(e)}")
 
 
 @app.on_event("startup")
