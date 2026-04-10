@@ -50,9 +50,7 @@ export default function Home() {
   const [accuracyStats, setAccuracyStats] = useState<AccuracyStats | null>(null);
 
   useEffect(() => {
-    const API_BASE = typeof window !== 'undefined' && window.location.hostname.includes('trycloudflare.com')
-      ? "https://fee-lease-equal-fisheries.trycloudflare.com"
-      : "http://localhost:8000";
+    const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
     // Convert timeRange to hours parameter
     const hoursParam = timeRange === "all" ? "" :

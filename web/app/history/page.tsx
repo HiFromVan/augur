@@ -10,7 +10,7 @@ import { AccuracyChart } from "@/components/AccuracyChart";
 import { LeagueStatsChart } from "@/components/LeagueStatsChart";
 import { TrendingUp, Target, Award, BarChart3 } from "lucide-react";
 
-const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "http://localhost:8000";
+const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
 interface AccuracyStats {
   total_predictions: number;

@@ -30,9 +30,7 @@ export default function PricingPage() {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    const API_BASE = typeof window !== 'undefined' && window.location.hostname.includes('trycloudflare.com')
-      ? "https://fee-lease-equal-fisheries.trycloudflare.com"
-      : "http://localhost:8000";
+    const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
     fetch(`${API_BASE}/api/subscription/plans`)
       .then((r) => r.json())

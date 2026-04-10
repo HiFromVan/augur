@@ -26,9 +26,7 @@ export default function AccountPage() {
       return;
     }
 
-    const API_BASE = typeof window !== 'undefined' && window.location.hostname.includes('trycloudflare.com')
-      ? "https://fee-lease-equal-fisheries.trycloudflare.com"
-      : "http://localhost:8000";
+    const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
     const token = localStorage.getItem("token");
     if (!token) return;
