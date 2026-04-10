@@ -416,6 +416,66 @@ _s_feature_names = []
 _s_pi_ratings = {}
 _s_league_stats = {}
 _s_loaded = False
+_s_team_alias = {}   # 中文名 -> 英文 canonical
+_s_league_alias = {} # 中文名 -> league code (e.g. '英超' -> 'PL')
+
+# 内置中文→英文球队映射（与 api/main.py 保持一致）
+_CHINESE_TO_ENGLISH = {
+    '阿森纳': 'Arsenal', '阿仙奴': 'Arsenal',
+    '切尔西': 'Chelsea', '曼联': 'Man United', '曼城': 'Man City',
+    '利物浦': 'Liverpool', '热刺': 'Tottenham', '纽卡斯尔': 'Newcastle',
+    '阿斯顿维拉': 'Aston Villa', '西汉姆': 'West Ham', '西汉姆联': 'West Ham', '狼队': 'Wolves',
+    '布莱顿': 'Brighton', '水晶宫': 'Crystal Palace', '富勒姆': 'Fulham',
+    '布伦特福德': 'Brentford', '伯恩利': 'Burnley', '埃弗顿': 'Everton',
+    '伯恩茅斯': 'Bournemouth', '诺丁汉': "Nott'm Forest", '莱斯特': 'Leicester',
+    '米堡': 'Middlesbrough', '米尔沃尔': 'Millwall', '伯明翰': 'Birmingham',
+    '布莱克本': 'Blackburn', '女王巡游': 'QPR', '沃特福德': 'Watford',
+    '诺维奇': 'Norwich', '朴次茅斯': 'Portsmouth', '西布罗姆': 'West Brom',
+    '考文垂': 'Coventry', '德比郡': 'Derby', '谢菲尔德联': 'Sheffield United',
+    '谢菲尔德周三': 'Sheffield Weds', '斯旺西': 'Swansea', '桑德兰': 'Sunderland',
+    '斯托克': 'Stoke', '普利茅斯': 'Plymouth', '普雷斯顿': 'Preston',
+    '卡迪夫': 'Cardiff', '布里斯托城': 'Bristol City', '赫尔城': 'Hull',
+    '伊普斯维奇': 'Ipswich', '利兹联': 'Leeds', '莱斯特城': 'Leicester',
+    '牛津联': 'Oxford', '南安普顿': 'Southampton',
+    '皇马': 'Real Madrid', '巴萨': 'Barcelona',
+    '塞维利亚': 'Sevilla', '毕尔巴鄂': 'Ath Bilbao', '皇家社会': 'Sociedad',
+    '贝蒂斯': 'Betis', '瓦伦西亚': 'Valencia', '比利亚雷亚尔': 'Villarreal',
+    '马德里竞技': 'Ath Madrid', '赫罗纳': 'Girona', '奥萨苏纳': 'Osasuna',
+    '赫塔费': 'Getafe', '西班牙人': 'Espanol', '阿拉维斯': 'Alaves',
+    '塞尔塔': 'Celta', '马洛卡': 'Mallorca', '莱加内斯': 'Leganes',
+    '巴拉多利德': 'Valladolid', '拉斯帕尔马斯': 'Las Palmas',
+    '亚特兰大': 'Atalanta', '国际米兰': 'Inter', '尤文图斯': 'Juventus',
+    '那不勒斯': 'Napoli', '罗马': 'Roma', '拉齐奥': 'Lazio',
+    '佛罗伦萨': 'Fiorentina', '米兰': 'Milan', '都灵': 'Torino',
+    '博洛尼亚': 'Bologna', '热那亚': 'Genoa', '乌迪内斯': 'Udinese',
+    '莱切': 'Lecce', '卡利亚里': 'Cagliari', '帕尔马': 'Parma',
+    '维罗纳': 'Verona', '科莫': 'Como 1907', '蒙扎': 'Monza', '威尼斯': 'Venezia',
+    '拜仁': 'Bayern Munich', '多特蒙德': 'Dortmund', '莱比锡': 'RB Leipzig',
+    '勒沃库森': 'Leverkusen', '法兰克福': 'Ein Frankfurt', '弗莱堡': 'Freiburg', '弗赖堡': 'Freiburg',
+    '霍芬海姆': 'Hoffenheim', '门兴': "M'gladbach", '沃尔夫斯堡': 'Wolfsburg',
+    '斯图加特': 'Stuttgart', '柏林联合': 'Union Berlin', '美因茨': 'Mainz',
+    '奥格斯堡': 'Augsburg', '不来梅': 'Werder Bremen', '科隆': 'FC Koln',
+    '海登海姆': 'Heidenheim', '圣保利': 'St Pauli', '汉堡': 'Hamburg',
+    '巴黎圣曼': 'Paris SG', '图卢兹': 'Toulouse', '里尔': 'Lille',
+    '里昂': 'Lyon', '马赛': 'Marseille', '摩纳哥': 'Monaco',
+    '朗斯': 'Lens', '雷恩': 'Rennes', '尼斯': 'Nice',
+    '南特': 'Nantes', '布雷斯特': 'Brest', '斯特拉斯': 'Strasbourg', '斯特拉斯堡': 'Strasbourg',
+    '昂热': 'Angers', '勒阿弗尔': 'Le Havre', '欧塞尔': 'Auxerre',
+    '里斯本竞技': 'Sporting CP', '本菲卡': 'Benfica', '波尔图': 'Porto',
+    '布拉加': 'Sp Braga', '法马利康': 'Famalicao', '摩雷伦斯': 'Moreirense',
+    '阿贾克斯': 'Ajax', '费耶诺德': 'Feyenoord', '埃因霍温': 'PSV Eindhoven',
+    '阿尔克马尔': 'AZ Alkmaar', '特温特': 'Twente', '乌得勒支': 'Utrecht',
+    '吉达联合': 'Al-Ittihad',
+}
+
+# 联赛中文名 -> league code
+_LEAGUE_CN_TO_CODE = {
+    '英超': 'PL', '英冠': 'ELC', '英甲': 'EL1',
+    '西甲': 'ESP1', '意甲': 'ITA1', '德甲': 'GER1',
+    '法甲': 'FRA1', '法乙': 'FRA2', '德乙': 'GER2',
+    '葡超': 'PPL', '荷甲': 'DED', '欧冠': 'CL', '欧联': 'EL', '欧罗巴': 'EL',
+    '欧协联': 'ECL', '澳超': 'BSA',
+}
 
 
 def _s_load_models():
@@ -515,8 +575,11 @@ def _s_h2h(home, away, h2h_idx, match_date, n=10):
 
 
 def _s_build_features(match, team_idx, h2h_idx, pi_ratings):
-    home = match['home_team']
-    away = match['away_team']
+    home_raw = match['home_team']
+    away_raw = match['away_team']
+    # 中文名转英文（用于查 pi_ratings 和 team_idx）
+    home = _s_team_alias.get(home_raw, home_raw)
+    away = _s_team_alias.get(away_raw, away_raw)
     match_dt = datetime.fromisoformat(match['date'].replace('Z', '+00:00')) \
         if isinstance(match['date'], str) else match['date']
 
@@ -528,7 +591,8 @@ def _s_build_features(match, team_idx, h2h_idx, pi_ratings):
     aw, a_s, a_c, ap = _s_recent_form(away, team_idx, match_dt)
     h2h_rate, h2h_draw, h2h_goals = _s_h2h(home, away, h2h_idx, match_dt)
 
-    league = match.get('league', 'unknown')
+    league_raw = match.get('league', 'unknown')
+    league = _s_league_alias.get(league_raw, league_raw)
     ls = _s_league_stats.get(league) or _s_league_stats.get('__global__') or {}
 
     # 赔率隐含概率
@@ -625,6 +689,16 @@ async def task_run_predictions():
         _s_load_models()
 
         p = await get_pool()
+
+        # 加载球队别名映射（中文→英文）
+        global _s_team_alias, _s_league_alias
+        async with p.acquire() as conn:
+            alias_rows = await conn.fetch(
+                "SELECT alias, canonical_name FROM team_aliases WHERE canonical_name IS NOT NULL AND active = true"
+            )
+            _s_team_alias = {**_CHINESE_TO_ENGLISH, **{r['alias']: r['canonical_name'] for r in alias_rows}}
+            league_rows = await conn.fetch("SELECT name_cn, code FROM leagues WHERE active = true")
+            _s_league_alias = {**_LEAGUE_CN_TO_CODE, **{r['name_cn']: r['code'] for r in league_rows}}
 
         # 读取历史（用于构建特征）
         async with p.acquire() as conn:
