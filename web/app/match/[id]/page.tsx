@@ -79,7 +79,8 @@ export default function MatchDetailPage() {
   const [awayLogoError, setAwayLogoError] = useState(false);
 
   useEffect(() => {
-    fetch(`/api/match/${id}`)
+    const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+    fetch(`${API_BASE}/api/match/${id}`)
       .then(r => r.json())
       .then(d => { setData(d); setLoading(false); })
       .catch(() => setLoading(false));
