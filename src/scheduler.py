@@ -73,6 +73,7 @@ async def task_scrape_fivehundred():
                 match_time = row.get('data-matchtime', '')
                 league_cn = row.get('data-simpleleague', '')
                 match_num = row.get('data-matchnum', '')
+                fid_num = row.get('data-fixtureid', '')
 
                 if not home or not away:
                     continue
@@ -113,7 +114,7 @@ async def task_scrape_fivehundred():
                             updated_at = NOW()
                         RETURNING id
                     """, match_dt, league_cn, home, away,
-                        odds_home, odds_draw, odds_away, match_num)
+                        odds_home, odds_draw, odds_away, fid_num)
 
                     # 存赔率快照
                     await conn.execute("""
@@ -389,13 +390,21 @@ async def task_update_live_scores():
                             if score is None:
                                 continue
                             home_goals, away_goals = score
+                            # 优先用 fid 匹配，fallback 到球队名+日期
                             result = await conn.execute("""
                                 UPDATE matches_live
-                                SET home_goals = $3, away_goals = $4,
+                                SET home_goals = $2, away_goals = $3,
                                     status = 'finished', updated_at = NOW()
-                                WHERE home_team = $1 AND away_team = $2
-                                  AND ($5::date IS NULL OR date::date = $5)
-                            """, home_team, away_team, home_goals, away_goals, match_date)
+                                WHERE source_match_id = $1
+                            """, fid, home_goals, away_goals)
+                            if result == 'UPDATE 0':
+                                result = await conn.execute("""
+                                    UPDATE matches_live
+                                    SET home_goals = $3, away_goals = $4,
+                                        status = 'finished', updated_at = NOW()
+                                    WHERE home_team = $1 AND away_team = $2
+                                      AND ($5::date IS NULL OR date::date = $5)
+                                """, home_team, away_team, home_goals, away_goals, match_date)
                             if result != 'UPDATE 0':
                                 updated += 1
 

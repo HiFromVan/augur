@@ -1,4 +1,8 @@
-"""一次性脚本：修复 matches_live 中已存入的错误半场比分，改为全场比分"""
+"""一次性脚本：
+1. 修复 matches_live.source_match_id 为 500.com fid
+2. 全量校正比分（从 detail 页取全场比分）
+3. 重新评估预测结果
+"""
 import asyncio
 import os
 import re
@@ -33,21 +37,21 @@ async def fetch_fulltime(client, fid):
 async def main():
     conn = await asyncpg.connect(DB)
 
-    # 取所有已有比分的 matches_live 记录
+    # 取所有 matches_live 记录
     db_matches = await conn.fetch("""
-        SELECT id, home_team, away_team, home_goals, away_goals, date::date as match_date
+        SELECT id, home_team, away_team, home_goals, away_goals, date::date as match_date, source_match_id
         FROM matches_live
-        WHERE status = 'finished' AND home_goals IS NOT NULL
         ORDER BY date DESC
     """)
-    print(f"Found {len(db_matches)} finished matches in DB")
+    print(f"Total matches_live: {len(db_matches)}")
 
-    # 从 500.com 列表页找 fid，覆盖最近 7 天
+    # 从 500.com 列表页爬 fid，覆盖最近 14 天
     today = date.today()
-    fid_map = {}  # (home_team, away_team, match_date) -> fid
+    # key: (home, away, match_date) -> fid
+    fid_map = {}
 
     async with httpx.AsyncClient(timeout=20.0) as client:
-        for i in range(7):
+        for i in range(14):
             d = today - timedelta(days=i)
             date_str = d.strftime('%Y-%m-%d')
             url = f"https://live.500.com/?e={date_str}"
@@ -56,9 +60,8 @@ async def main():
                 resp.encoding = 'gb2312'
                 soup = BeautifulSoup(resp.text, 'html.parser')
                 rows = soup.find_all('tr', id=re.compile(r'^a\d+'))
+                cnt = 0
                 for row in rows:
-                    if row.get('status') != '4':
-                        continue
                     fid = row.get('fid', '')
                     gy = row.get('gy', '')
                     parts = gy.split(',')
@@ -66,7 +69,6 @@ async def main():
                         continue
                     home = parts[1].strip()
                     away = parts[2].strip()
-                    # 取比赛实际日期（从 td 文本）
                     match_date_key = None
                     for td in row.find_all('td'):
                         td_text = td.get_text(strip=True)
@@ -77,34 +79,62 @@ async def main():
                     if match_date_key is None:
                         match_date_key = d
                     fid_map[(home, away, match_date_key)] = fid
-                print(f"  {date_str}: found {len([k for k in fid_map if k[2] == d or k[2] == d + timedelta(days=1)])} finished matches")
+                    cnt += 1
+                print(f"  {date_str}: {cnt} matches")
             except Exception as e:
                 print(f"  {date_str}: {e}")
 
         print(f"\nTotal fid mappings: {len(fid_map)}")
 
-        # 匹配 DB 记录和 fid
-        to_fix = []
+        # 匹配并更新 source_match_id
+        fid_updated = 0
         for row in db_matches:
+            key = (row['home_team'], row['away_team'], row['match_date'])
+            fid = fid_map.get(key)
+            if fid and row['source_match_id'] != fid:
+                await conn.execute(
+                    "UPDATE matches_live SET source_match_id=$2 WHERE id=$1",
+                    row['id'], fid
+                )
+                fid_updated += 1
+        print(f"Updated source_match_id for {fid_updated} records")
+
+        # 全量校正比分（只处理有 fid 的已完赛比赛）
+        finished = await conn.fetch("""
+            SELECT id, home_team, away_team, home_goals, away_goals, source_match_id
+            FROM matches_live
+            WHERE status = 'finished' AND source_match_id ~ '^[0-9]+'
+        """)
+        # 也包含 status=finished 但 source_match_id 是旧格式的（用 fid_map 找）
+        finished_old = await conn.fetch("""
+            SELECT id, home_team, away_team, home_goals, away_goals, source_match_id, date::date as match_date
+            FROM matches_live
+            WHERE status = 'finished' AND (source_match_id NOT SIMILAR TO '[0-9]+' OR source_match_id IS NULL)
+        """)
+
+        to_fix = []
+        for row in finished:
+            to_fix.append((row['id'], row['home_team'], row['away_team'],
+                          row['home_goals'], row['away_goals'], row['source_match_id']))
+        for row in finished_old:
             key = (row['home_team'], row['away_team'], row['match_date'])
             fid = fid_map.get(key)
             if fid:
                 to_fix.append((row['id'], row['home_team'], row['away_team'],
-                               row['home_goals'], row['away_goals'], fid))
+                              row['home_goals'], row['away_goals'], fid))
 
-        print(f"Matched {len(to_fix)} records to fix")
+        print(f"\nVerifying {len(to_fix)} finished matches...")
 
-        # 并发取全场比分
         scores = await asyncio.gather(*[fetch_fulltime(client, fid) for _, _, _, _, _, fid in to_fix])
 
         fixed = 0
         for (match_id, home, away, old_h, old_a, fid), score in zip(to_fix, scores):
             if score is None:
-                print(f"  SKIP {home} vs {away}: detail page failed")
+                print(f"  SKIP {home} vs {away} (fid={fid}): detail page failed")
                 continue
             new_h, new_a = score
-            if new_h == old_h and new_a == old_a:
-                print(f"  OK   {home} vs {away}: {old_h}-{old_a} (unchanged)")
+            if old_h == new_h and old_a == new_a:
+                print(f"  OK   {home} vs {away}: {old_h}-{old_a}")
             else:
                 print(f"  FIX  {home} vs {away}: {old_h}-{old_a} -> {new_h}-{new_a}")
                 await conn.execute("""
@@ -113,13 +143,12 @@ async def main():
                 """, match_id, new_h, new_a)
                 fixed += 1
 
-    print(f"\nFixed {fixed} records")
+    print(f"\nFixed {fixed} score records")
 
-    # 重新评估预测
-    if fixed > 0:
-        print("Re-evaluating predictions...")
-        result = await conn.fetchrow("SELECT * FROM batch_evaluate_predictions(200)")
-        print(f"Evaluated: {result[0]}, Failed: {result[1]}")
+    # 重新评估所有预测
+    print("Re-evaluating all predictions...")
+    result = await conn.fetchrow("SELECT * FROM batch_evaluate_predictions(500)")
+    print(f"Evaluated: {result[0]}, Failed: {result[1]}")
 
     await conn.close()
 
