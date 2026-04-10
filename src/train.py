@@ -117,7 +117,7 @@ def _h2h(home_t: str, away_t: str, match_date, h2h_index: dict, n=10):
 
 
 def build_features(match: dict, pi_ratings: dict,
-                   team_index: dict, h2h_index: dict) -> dict:
+                   team_index: dict, h2h_index: dict, league_stats: dict = None) -> dict:
     """构建一场比赛的特征"""
     home = match['home_team']
     away = match['away_team']
@@ -150,7 +150,7 @@ def build_features(match: dict, pi_ratings: dict,
         'pi_defense_away': ar['defense'],
         'pi_diff': pi_diff,
         'home_advantage': 0.25,
-        'league': hash(match['league']) % 1000,
+        'league': match.get('league', 'unknown'),
         'win_rate_home_5': hw,
         'goals_scored_home_5': hs,
         'goals_conceded_home_5': hc,
@@ -176,7 +176,33 @@ def build_features(match: dict, pi_ratings: dict,
         'ou_line': match.get('odds_ou_line') or 0.0,
         'ou_over': match.get('odds_ou_over') or 0.0,
         'ou_under': match.get('odds_ou_under') or 0.0,
+        # 联赛平均进球特征
+        'league_avg_home_goals': (league_stats or {}).get(match.get('league', ''), {}).get('avg_home') or (league_stats or {}).get('__global__', {}).get('avg_home', 1.36),
+        'league_avg_away_goals': (league_stats or {}).get(match.get('league', ''), {}).get('avg_away') or (league_stats or {}).get('__global__', {}).get('avg_away', 1.18),
+        'league_avg_total_goals': (league_stats or {}).get(match.get('league', ''), {}).get('avg_total') or (league_stats or {}).get('__global__', {}).get('avg_total', 2.54),
     }
+
+
+def build_league_stats(matches: list) -> dict:
+    """预计算每个联赛的历史平均进球数"""
+    from collections import defaultdict
+    stats = defaultdict(lambda: {'home_goals': [], 'away_goals': []})
+    for m in matches:
+        if m['home_goals'] is not None and m['away_goals'] is not None:
+            league = m.get('league', 'unknown')
+            stats[league]['home_goals'].append(m['home_goals'])
+            stats[league]['away_goals'].append(m['away_goals'])
+    result = {}
+    global_home = np.mean([m['home_goals'] for m in matches if m['home_goals'] is not None])
+    global_away = np.mean([m['away_goals'] for m in matches if m['away_goals'] is not None])
+    for league, data in stats.items():
+        result[league] = {
+            'avg_home': np.mean(data['home_goals']) if data['home_goals'] else global_home,
+            'avg_away': np.mean(data['away_goals']) if data['away_goals'] else global_away,
+            'avg_total': np.mean([h + a for h, a in zip(data['home_goals'], data['away_goals'])]),
+        }
+    result['__global__'] = {'avg_home': global_home, 'avg_away': global_away, 'avg_total': global_home + global_away}
+    return result
 
 
 async def main():
@@ -212,7 +238,8 @@ async def main():
     print("\nBuilding indexes...")
     team_index = build_team_index(matches)
     h2h_index = build_h2h_index(matches)
-    print(f"Team index: {len(team_index)} teams")
+    league_stats = build_league_stats(matches)
+    print(f"Team index: {len(team_index)} teams, {len(league_stats)-1} leagues")
 
     # 构建特征
     print("\nBuilding features...")
@@ -221,7 +248,7 @@ async def main():
     dates = []
 
     for i, match in enumerate(matches):
-        features = build_features(match, pi_ratings, team_index, h2h_index)
+        features = build_features(match, pi_ratings, team_index, h2h_index, league_stats)
 
         # 标签
         if match['home_goals'] > match['away_goals']:
@@ -258,18 +285,24 @@ async def main():
     print(f"\nTrain (before {split_date}): {len(X_train)}")
     print(f"Test ({split_date}+): {len(X_test)}")
 
-    # 转成 numpy
-    X_train_arr = np.array([[f.get(k, 0.0) for k in feature_names] for f in X_train])
+    # 转成列表（保留 league 字符串）
+    league_idx_cls = feature_names.index('league') if 'league' in feature_names else None
+    cat_features_cls = [league_idx_cls] if league_idx_cls is not None else []
+
+    def to_rows_cls(feat_list):
+        return [[f.get(k, 0.0) if k != 'league' else f.get(k, 'unknown') for k in feature_names] for f in feat_list]
+
+    X_train_arr = to_rows_cls(X_train)
     y_train_arr = np.array(y_train)
-    X_test_arr = np.array([[f.get(k, 0.0) for k in feature_names] for f in X_test])
+    X_test_arr = to_rows_cls(X_test)
     y_test_arr = np.array(y_test)
 
     # 训练 CatBoost
     print("\nTraining CatBoost...")
     from catboost import CatBoostClassifier, Pool
 
-    train_pool = Pool(X_train_arr, y_train_arr)
-    test_pool = Pool(X_test_arr, y_test_arr)
+    train_pool = Pool(X_train_arr, y_train_arr, cat_features=cat_features_cls)
+    test_pool = Pool(X_test_arr, y_test_arr, cat_features=cat_features_cls)
 
     model = CatBoostClassifier(
         iterations=1000,
@@ -285,8 +318,8 @@ async def main():
     model.fit(train_pool, eval_set=test_pool)
 
     # 评估
-    train_acc = model.score(X_train_arr, y_train_arr)
-    test_acc = model.score(X_test_arr, y_test_arr)
+    train_acc = model.score(train_pool)
+    test_acc = model.score(test_pool)
 
     print(f"\nTrain accuracy: {train_acc:.2%}")
     print(f"Test accuracy: {test_acc:.2%}")
@@ -297,7 +330,7 @@ async def main():
         cum_actual = np.cumsum([1 if actual == i else 0 for i in range(3)])
         return np.mean((cum_probs - cum_actual) ** 2)
 
-    preds = model.predict_proba(X_test_arr)
+    preds = model.predict_proba(test_pool)
     rps_scores = [rps(p, a) for p, a in zip(preds, y_test_arr)]
     avg_rps = np.mean(rps_scores)
 
@@ -324,6 +357,11 @@ async def main():
     with open(os.path.join(MODEL_DIR, "pi_ratings_v1.json"), "w") as f:
         json.dump(pi_serializable, f)
 
+    # 保存联赛统计
+    league_stats_serializable = {k: {kk: float(vv) for kk, vv in v.items()} for k, v in league_stats.items()}
+    with open(os.path.join(MODEL_DIR, "league_stats_v1.json"), "w") as f:
+        json.dump(league_stats_serializable, f)
+
     print(f"\nClassification model saved to {model_path}")
     print(f"Pi-Ratings saved ({len(pi_ratings)} teams)")
     print(f"Feature names saved")
@@ -342,7 +380,7 @@ async def main():
     y_away_test = []
 
     for match in matches:
-        features = build_features(match, pi_ratings, team_index, h2h_index)
+        features = build_features(match, pi_ratings, team_index, h2h_index, league_stats)
 
         if features is None:
             continue
@@ -361,9 +399,16 @@ async def main():
 
     print(f"\nGoals prediction - Train: {len(X_goals_train)}, Test: {len(X_goals_test)}")
 
-    # 转成 numpy
-    X_goals_train_arr = np.array([[f.get(k, 0.0) for k in feature_names] for f in X_goals_train])
-    X_goals_test_arr = np.array([[f.get(k, 0.0) for k in feature_names] for f in X_goals_test])
+    # league 是 categorical 特征
+    league_idx = feature_names.index('league') if 'league' in feature_names else None
+    cat_features = [league_idx] if league_idx is not None else []
+
+    # 转成列表（保留字符串类型）
+    def to_rows(feat_list):
+        return [[f.get(k, 0.0) if k != 'league' else f.get(k, 'unknown') for k in feature_names] for f in feat_list]
+
+    X_goals_train_arr = to_rows(X_goals_train)
+    X_goals_test_arr = to_rows(X_goals_test)
     y_home_train_arr = np.array(y_home_train)
     y_away_train_arr = np.array(y_away_train)
     y_home_test_arr = np.array(y_home_test)
@@ -373,14 +418,14 @@ async def main():
     from catboost import CatBoostRegressor
 
     print("\n=== Training Home Goals Model ===")
-    home_goals_pool_train = Pool(X_goals_train_arr, y_home_train_arr)
-    home_goals_pool_test = Pool(X_goals_test_arr, y_home_test_arr)
+    home_goals_pool_train = Pool(X_goals_train_arr, y_home_train_arr, cat_features=cat_features)
+    home_goals_pool_test = Pool(X_goals_test_arr, y_home_test_arr, cat_features=cat_features)
 
     home_model = CatBoostRegressor(
         iterations=1000,
         learning_rate=0.05,
         depth=6,
-        loss_function='RMSE',
+        loss_function='Poisson',
         eval_metric='RMSE',
         early_stopping_rounds=50,
         verbose=100,
@@ -388,20 +433,20 @@ async def main():
     )
     home_model.fit(home_goals_pool_train, eval_set=home_goals_pool_test)
 
-    home_train_rmse = np.sqrt(np.mean((home_model.predict(X_goals_train_arr) - y_home_train_arr) ** 2))
-    home_test_rmse = np.sqrt(np.mean((home_model.predict(X_goals_test_arr) - y_home_test_arr) ** 2))
+    home_train_rmse = np.sqrt(np.mean((home_model.predict(home_goals_pool_train) - y_home_train_arr) ** 2))
+    home_test_rmse = np.sqrt(np.mean((home_model.predict(home_goals_pool_test) - y_home_test_arr) ** 2))
     print(f"Home Goals - Train RMSE: {home_train_rmse:.4f}, Test RMSE: {home_test_rmse:.4f}")
 
     # 训练客队进球模型
     print("\n=== Training Away Goals Model ===")
-    away_goals_pool_train = Pool(X_goals_train_arr, y_away_train_arr)
-    away_goals_pool_test = Pool(X_goals_test_arr, y_away_test_arr)
+    away_goals_pool_train = Pool(X_goals_train_arr, y_away_train_arr, cat_features=cat_features)
+    away_goals_pool_test = Pool(X_goals_test_arr, y_away_test_arr, cat_features=cat_features)
 
     away_model = CatBoostRegressor(
         iterations=1000,
         learning_rate=0.05,
         depth=6,
-        loss_function='RMSE',
+        loss_function='Poisson',
         eval_metric='RMSE',
         early_stopping_rounds=50,
         verbose=100,
@@ -409,8 +454,8 @@ async def main():
     )
     away_model.fit(away_goals_pool_train, eval_set=away_goals_pool_test)
 
-    away_train_rmse = np.sqrt(np.mean((away_model.predict(X_goals_train_arr) - y_away_train_arr) ** 2))
-    away_test_rmse = np.sqrt(np.mean((away_model.predict(X_goals_test_arr) - y_away_test_arr) ** 2))
+    away_train_rmse = np.sqrt(np.mean((away_model.predict(away_goals_pool_train) - y_away_train_arr) ** 2))
+    away_test_rmse = np.sqrt(np.mean((away_model.predict(away_goals_pool_test) - y_away_test_arr) ** 2))
     print(f"Away Goals - Train RMSE: {away_train_rmse:.4f}, Test RMSE: {away_test_rmse:.4f}")
 
     # 保存进球预测模型

@@ -407,18 +407,20 @@ MODEL_PATH_S = MODEL_DIR_S / "catboost_v1.cbm"
 HOME_GOALS_MODEL_PATH_S = MODEL_DIR_S / "home_goals_v1.cbm"
 AWAY_GOALS_MODEL_PATH_S = MODEL_DIR_S / "away_goals_v1.cbm"
 FEATURES_PATH_S = MODEL_DIR_S / "features_v1.json"
+LEAGUE_STATS_PATH_S = MODEL_DIR_S / "league_stats_v1.json"
 
 _s_model = None
 _s_poisson_home = None
 _s_poisson_away = None
 _s_feature_names = []
 _s_pi_ratings = {}
+_s_league_stats = {}
 _s_loaded = False
 
 
 def _s_load_models():
     """加载模型（全局缓存）"""
-    global _s_model, _s_poisson_home, _s_poisson_away, _s_feature_names, _s_pi_ratings, _s_loaded
+    global _s_model, _s_poisson_home, _s_poisson_away, _s_feature_names, _s_pi_ratings, _s_league_stats, _s_loaded
     if _s_loaded:
         return
     import json
@@ -428,6 +430,9 @@ def _s_load_models():
     if FEATURES_PATH_S.exists():
         with open(FEATURES_PATH_S) as f:
             _s_feature_names = json.load(f)
+    if LEAGUE_STATS_PATH_S.exists():
+        with open(LEAGUE_STATS_PATH_S) as f:
+            _s_league_stats = json.load(f)
     if MODEL_PATH_S.exists():
         try:
             from catboost import CatBoostClassifier
@@ -523,6 +528,19 @@ def _s_build_features(match, team_idx, h2h_idx, pi_ratings):
     aw, a_s, a_c, ap = _s_recent_form(away, team_idx, match_dt)
     h2h_rate, h2h_draw, h2h_goals = _s_h2h(home, away, h2h_idx, match_dt)
 
+    league = match.get('league', 'unknown')
+    ls = _s_league_stats.get(league) or _s_league_stats.get('__global__') or {}
+
+    # 赔率隐含概率
+    oh = match.get('odds_home') or 0.0
+    od = match.get('odds_draw') or 0.0
+    oa = match.get('odds_away') or 0.0
+    implied_home = implied_draw = implied_away = 1/3
+    if oh and od and oa:
+        ih, id_, ia = 1/oh, 1/od, 1/oa
+        total = ih + id_ + ia
+        implied_home, implied_draw, implied_away = ih/total, id_/total, ia/total
+
     return {
         'pi_attack_home': hr['attack'],
         'pi_defense_home': hr['defense'],
@@ -530,7 +548,7 @@ def _s_build_features(match, team_idx, h2h_idx, pi_ratings):
         'pi_defense_away': ar['defense'],
         'pi_diff': pi_diff,
         'home_advantage': 0.25,
-        'league': hash(match.get('league', '')) % 1000,
+        'league': league,
         'win_rate_home_5': hw,
         'goals_scored_home_5': hs,
         'goals_conceded_home_5': hc,
@@ -542,6 +560,20 @@ def _s_build_features(match, team_idx, h2h_idx, pi_ratings):
         'h2h_win_rate': h2h_rate,
         'h2h_draw_rate': h2h_draw,
         'h2h_avg_goals': h2h_goals,
+        'implied_home': implied_home,
+        'implied_draw': implied_draw,
+        'implied_away': implied_away,
+        'odds_home': oh,
+        'odds_draw': od,
+        'odds_away': oa,
+        'asian_home': match.get('odds_asian_home') or 0.0,
+        'asian_away': match.get('odds_asian_away') or 0.0,
+        'ou_line': match.get('odds_ou_line') or 0.0,
+        'ou_over': match.get('odds_ou_over') or 0.0,
+        'ou_under': match.get('odds_ou_under') or 0.0,
+        'league_avg_home_goals': ls.get('avg_home', 1.36),
+        'league_avg_away_goals': ls.get('avg_away', 1.18),
+        'league_avg_total_goals': ls.get('avg_total', 2.54),
     }
 
 
@@ -549,7 +581,7 @@ def _s_predict_proba(features, feature_names):
     """纯 Python 预测"""
     if _s_model and feature_names:
         try:
-            ordered = [features.get(fn, 0.0) for fn in feature_names]
+            ordered = [features.get(fn, 'unknown') if fn == 'league' else features.get(fn, 0.0) for fn in feature_names]
             probs = _s_model.predict_proba([ordered])[0]
             return {'home': float(probs[0]), 'draw': float(probs[1]), 'away': float(probs[2])}
         except Exception:
@@ -559,49 +591,29 @@ def _s_predict_proba(features, feature_names):
 
 
 def _s_predict_score(features, feature_names, pred_proba):
-    """泊松比分预测，结果与胜平负概率保持一致"""
+    """泊松比分预测，直接取最高概率比分，不强制对齐胜平负"""
     import math
     exp_home = features.get('goals_scored_home_5', 1.2)
     exp_away = features.get('goals_scored_away_5', 1.0)
     if _s_poisson_home:
         try:
-            ordered = [features.get(fn, 0.0) for fn in feature_names]
+            ordered = [features.get(fn, 'unknown') if fn == 'league' else features.get(fn, 0.0) for fn in feature_names]
             exp_home = max(_s_poisson_home.predict([ordered])[0], 0.1)
             exp_away = max(_s_poisson_away.predict([ordered])[0], 0.1)
         except Exception:
             pass
 
-    # 确定概率最高的结果
-    best = max(pred_proba, key=pred_proba.get)  # 'home' | 'draw' | 'away'
+    best_prob, best_sh, best_sa = -1, 1, 0
+    for h in range(8):
+        ph = math.exp(-exp_home) * (exp_home ** h) / math.factorial(h)
+        for a in range(8):
+            pa = math.exp(-exp_away) * (exp_away ** a) / math.factorial(a)
+            p = ph * pa
+            if p > best_prob:
+                best_prob = p
+                best_sh, best_sa = h, a
 
-    # 泊松众数比分
-    sh = max(round(exp_home), 0)
-    sa = max(round(exp_away), 0)
-
-    # 检查比分是否与概率结果一致
-    def score_result(h, a):
-        if h > a: return 'home'
-        if h == a: return 'draw'
-        return 'away'
-
-    if score_result(sh, sa) != best:
-        # 从泊松分布中找与 best 一致的最高概率比分
-        max_goals = 6
-        best_prob = -1
-        best_sh, best_sa = sh, sa
-        for h in range(max_goals + 1):
-            ph = math.exp(-exp_home) * (exp_home ** h) / math.factorial(h)
-            for a in range(max_goals + 1):
-                if score_result(h, a) != best:
-                    continue
-                pa = math.exp(-exp_away) * (exp_away ** a) / math.factorial(a)
-                p = ph * pa
-                if p > best_prob:
-                    best_prob = p
-                    best_sh, best_sa = h, a
-        sh, sa = best_sh, best_sa
-
-    return sh, sa, round(exp_home, 2), round(exp_away, 2)
+    return best_sh, best_sa, round(exp_home, 2), round(exp_away, 2)
 
 
 async def task_run_predictions():
@@ -635,7 +647,10 @@ async def task_run_predictions():
         async with p.acquire() as conn:
             matches = await conn.fetch("""
                 SELECT id, date, league, home_team, away_team,
-                       odds_home, odds_draw, odds_away, status
+                       odds_home, odds_draw, odds_away,
+                       odds_asian_home, odds_asian_handicap, odds_asian_away,
+                       odds_ou_line, odds_ou_over, odds_ou_under,
+                       status
                 FROM matches_live
                 WHERE date::date >= $1
                   AND date::date <= $2
