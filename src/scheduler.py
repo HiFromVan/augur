@@ -666,6 +666,16 @@ def _s_build_features(match, team_idx, h2h_idx, pi_ratings):
 
 def _s_predict_proba(features, feature_names):
     """纯 Python 预测"""
+    # 如果 pi_ratings 全是 0（队名未匹配），直接用赔率隐含概率
+    pi_sum = abs(features.get('pi_attack_home', 0)) + abs(features.get('pi_defense_home', 0)) + \
+             abs(features.get('pi_attack_away', 0)) + abs(features.get('pi_defense_away', 0))
+    if pi_sum == 0.0:
+        ih = features.get('implied_home', 1/3)
+        id_ = features.get('implied_draw', 1/3)
+        ia = features.get('implied_away', 1/3)
+        if ih + id_ + ia > 0:
+            return {'home': ih, 'draw': id_, 'away': ia}
+
     if _s_model and feature_names:
         try:
             ordered = [features.get(fn, 'unknown') if fn == 'league' else features.get(fn, 0.0) for fn in feature_names]
@@ -674,21 +684,34 @@ def _s_predict_proba(features, feature_names):
         except Exception:
             pass
     # fallback
-    return {'home': 0.33, 'draw': 0.33, 'away': 0.34}
+    return {'home': features.get('implied_home', 0.33), 'draw': features.get('implied_draw', 0.33), 'away': features.get('implied_away', 0.34)}
 
 
 def _s_predict_score(features, feature_names, pred_proba):
     """泊松比分预测，直接取最高概率比分，不强制对齐胜平负"""
     import math
-    exp_home = features.get('goals_scored_home_5', 1.2)
-    exp_away = features.get('goals_scored_away_5', 1.0)
-    if _s_poisson_home:
+    league_avg_h = features.get('league_avg_home_goals', 1.36)
+    league_avg_a = features.get('league_avg_away_goals', 1.18)
+    exp_home = features.get('goals_scored_home_5', league_avg_h)
+    exp_away = features.get('goals_scored_away_5', league_avg_a)
+
+    pi_sum = abs(features.get('pi_attack_home', 0)) + abs(features.get('pi_defense_home', 0)) + \
+             abs(features.get('pi_attack_away', 0)) + abs(features.get('pi_defense_away', 0))
+
+    if _s_poisson_home and pi_sum > 0:
         try:
             ordered = [features.get(fn, 'unknown') if fn == 'league' else features.get(fn, 0.0) for fn in feature_names]
             exp_home = max(_s_poisson_home.predict([ordered])[0], 0.1)
             exp_away = max(_s_poisson_away.predict([ordered])[0], 0.1)
         except Exception:
             pass
+    else:
+        # 无 pi_ratings 时用赔率隐含概率调整联赛均值
+        ph = features.get('implied_home', 1/3)
+        pa = features.get('implied_away', 1/3)
+        total = league_avg_h + league_avg_a
+        exp_home = total * ph / (ph + pa) if (ph + pa) > 0 else league_avg_h
+        exp_away = total * pa / (ph + pa) if (ph + pa) > 0 else league_avg_a
 
     best_prob, best_sh, best_sa = -1, 1, 0
     for h in range(8):
