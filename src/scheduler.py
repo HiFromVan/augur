@@ -551,7 +551,7 @@ def _s_predict_proba(features, feature_names):
         try:
             ordered = [features.get(fn, 0.0) for fn in feature_names]
             probs = _s_model.predict_proba([ordered])[0]
-            return {'home': float(probs[1]), 'draw': float(probs[2]), 'away': float(probs[0])}
+            return {'home': float(probs[0]), 'draw': float(probs[1]), 'away': float(probs[2])}
         except Exception:
             pass
     # fallback
