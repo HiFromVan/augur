@@ -344,26 +344,34 @@ async def task_update_live_scores():
                     updated = 0
 
                     # 收集已完赛比赛的 fid，并发请求 detail 页取全场比分
+                    # 只处理尚未有比分的比赛（避免重复请求）
                     finished_rows = []
-                    for row in rows:
-                        if row.get('status') != '4':
-                            continue
-                        gy = row.get('gy', '')
-                        fid = row.get('fid', '')
-                        parts = gy.split(',')
-                        if len(parts) < 3 or not fid:
-                            continue
-                        home_team = parts[1].strip()
-                        away_team = parts[2].strip()
-                        # 比赛日期
-                        match_date = None
-                        for td in row.find_all('td'):
-                            td_text = td.get_text(strip=True)
-                            dm = re.match(r'^(\d{2}-\d{2})\s+\d{2}:\d{2}$', td_text)
-                            if dm:
-                                match_date = date(today.year, int(dm.group(1).split('-')[0]), int(dm.group(1).split('-')[1]))
-                                break
-                        finished_rows.append((fid, home_team, away_team, match_date))
+                    async with p.acquire() as conn_check:
+                        for row in rows:
+                            if row.get('status') != '4':
+                                continue
+                            gy = row.get('gy', '')
+                            fid = row.get('fid', '')
+                            parts = gy.split(',')
+                            if len(parts) < 3 or not fid:
+                                continue
+                            # 已有比分则跳过
+                            existing = await conn_check.fetchrow(
+                                "SELECT home_goals FROM matches_live WHERE source_match_id=$1 AND home_goals IS NOT NULL",
+                                fid
+                            )
+                            if existing:
+                                continue
+                            home_team = parts[1].strip()
+                            away_team = parts[2].strip()
+                            match_date = None
+                            for td in row.find_all('td'):
+                                td_text = td.get_text(strip=True)
+                                dm = re.match(r'^(\d{2}-\d{2})\s+\d{2}:\d{2}$', td_text)
+                                if dm:
+                                    match_date = date(today.year, int(dm.group(1).split('-')[0]), int(dm.group(1).split('-')[1]))
+                                    break
+                            finished_rows.append((fid, home_team, away_team, match_date))
 
                     # 并发请求 detail 页取全场比分
                     async def fetch_fulltime(fid):
