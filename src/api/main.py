@@ -1975,9 +1975,11 @@ async def get_predictions_list(
         elif status == "incorrect":
             conditions.append("pr.is_correct = false AND pr.evaluated_at IS NOT NULL")
         elif status == "pending":
-            conditions.append("pr.evaluated_at IS NULL AND m.date < NOW()")
+            conditions.append("pr.evaluated_at IS NULL AND m.status != 'finished' AND m.date < NOW() + INTERVAL '8 hours'")
         elif status == "evaluated":
             conditions.append("pr.evaluated_at IS NOT NULL")
+        elif status == "finished":
+            conditions.append("m.status = 'finished'")
 
         if league != "all":
             param_count += 1
@@ -2022,7 +2024,10 @@ async def get_predictions_list(
                 m.away_team,
                 m.odds_home,
                 m.odds_draw,
-                m.odds_away
+                m.odds_away,
+                m.home_goals,
+                m.away_goals,
+                m.status as match_status
             FROM prediction_records pr
             JOIN matches_live m ON pr.match_live_id = m.id
             WHERE {where_clause}
@@ -2062,7 +2067,10 @@ async def get_predictions_list(
                     "odds_draw": float(row['odds_draw']) if row['odds_draw'] else None,
                     "odds_away": float(row['odds_away']) if row['odds_away'] else None,
                     "predicted_at": row['predicted_at'].isoformat() if row['predicted_at'] else None,
-                    "evaluated_at": row['evaluated_at'].isoformat() if row['evaluated_at'] else None
+                    "evaluated_at": row['evaluated_at'].isoformat() if row['evaluated_at'] else None,
+                    "home_goals": row['home_goals'],
+                    "away_goals": row['away_goals'],
+                    "status": row['match_status'],
                 }
                 for row in records
             ]
