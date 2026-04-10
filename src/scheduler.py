@@ -437,11 +437,11 @@ def _s_load_models():
             print(f"  CatBoost 加载失败: {e}")
     if HOME_GOALS_MODEL_PATH_S.exists():
         try:
-            import pickle
-            with open(HOME_GOALS_MODEL_PATH_S, 'rb') as f:
-                _s_poisson_home = pickle.load(f)
-            with open(AWAY_GOALS_MODEL_PATH_S, 'rb') as f:
-                _s_poisson_away = pickle.load(f)
+            from catboost import CatBoostRegressor
+            _s_poisson_home = CatBoostRegressor()
+            _s_poisson_home.load_model(HOME_GOALS_MODEL_PATH_S)
+            _s_poisson_away = CatBoostRegressor()
+            _s_poisson_away.load_model(AWAY_GOALS_MODEL_PATH_S)
         except Exception as e:
             print(f"  泊松模型加载失败: {e}")
     _s_loaded = True
