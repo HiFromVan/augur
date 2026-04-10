@@ -2206,16 +2206,19 @@ async def chat_with_ai(request: ChatRequest, token: str = Header(None)):
 @app.on_event("startup")
 async def startup():
     global team_aliases_cache
-    pool = await get_pool()
-    async with pool.acquire() as conn:
-        rows = await conn.fetch(
-            "SELECT alias, canonical_name FROM team_aliases WHERE canonical_name IS NOT NULL AND active = true"
-        )
-        team_aliases_cache = {r['alias']: r['canonical_name'] for r in rows}
-        # 合并内存字典（DB 优先）
-        merged = {**CHINESE_TO_ENGLISH, **team_aliases_cache}
-        team_aliases_cache = merged
-    print(f"Loaded {len(team_aliases_cache)} team aliases")
+    try:
+        pool = await get_pool()
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT alias, canonical_name FROM team_aliases WHERE canonical_name IS NOT NULL AND active = true"
+            )
+            team_aliases_cache = {r['alias']: r['canonical_name'] for r in rows}
+            merged = {**CHINESE_TO_ENGLISH, **team_aliases_cache}
+            team_aliases_cache = merged
+        print(f"Loaded {len(team_aliases_cache)} team aliases")
+    except Exception as e:
+        print(f"DB not available at startup, using in-memory aliases only: {e}")
+        team_aliases_cache = dict(CHINESE_TO_ENGLISH)
 
 
 @app.on_event("shutdown")
