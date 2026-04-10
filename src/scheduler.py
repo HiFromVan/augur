@@ -768,10 +768,10 @@ async def task_run_predictions():
         # 如果没有本地 pi_ratings，从历史计算
         pi_ratings = _s_pi_ratings if _s_pi_ratings else _s_compute_pi_ratings(hist_matches)
 
-        # 读取待预测比赛（今天+明天+昨天，避免遗漏跨天）
+        # 读取待预测比赛（昨天到未来7天）
         today = date.today()
         date_from = today - timedelta(days=1)
-        date_to = today + timedelta(days=2)
+        date_to = today + timedelta(days=7)
         async with p.acquire() as conn:
             matches = await conn.fetch("""
                 SELECT id, date, league, home_team, away_team,
