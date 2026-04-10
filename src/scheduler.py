@@ -342,39 +342,53 @@ async def task_update_live_scores():
                     p = await get_pool()
                     updated = 0
 
+                    # 收集已完赛比赛的 fid，并发请求 detail 页取全场比分
+                    finished_rows = []
+                    for row in rows:
+                        if row.get('status') != '4':
+                            continue
+                        gy = row.get('gy', '')
+                        fid = row.get('fid', '')
+                        parts = gy.split(',')
+                        if len(parts) < 3 or not fid:
+                            continue
+                        home_team = parts[1].strip()
+                        away_team = parts[2].strip()
+                        # 比赛日期
+                        match_date = None
+                        for td in row.find_all('td'):
+                            td_text = td.get_text(strip=True)
+                            dm = re.match(r'^(\d{2}-\d{2})\s+\d{2}:\d{2}$', td_text)
+                            if dm:
+                                match_date = date(today.year, int(dm.group(1).split('-')[0]), int(dm.group(1).split('-')[1]))
+                                break
+                        finished_rows.append((fid, home_team, away_team, match_date))
+
+                    # 并发请求 detail 页取全场比分
+                    async def fetch_fulltime(fid):
+                        try:
+                            detail_url = f"https://live.500.com/detail.php?fid={fid}&r=1"
+                            r = await client.get(detail_url, headers={'User-Agent': 'Mozilla/5.0'})
+                            r.encoding = 'gb2312'
+                            detail_soup = BeautifulSoup(r.text, 'html.parser')
+                            score_span = detail_soup.find('span', class_='score')
+                            if not score_span:
+                                return None
+                            m = re.search(r'(\d+)\s*-\s*(\d+)', score_span.get_text())
+                            if not m:
+                                return None
+                            return int(m.group(1)), int(m.group(2))
+                        except Exception:
+                            return None
+
+                    import asyncio as _asyncio
+                    scores = await _asyncio.gather(*[fetch_fulltime(fid) for fid, _, _, _ in finished_rows])
+
                     async with p.acquire() as conn:
-                        for row in rows:
-                            gy = row.get('gy', '')
-                            status_val = row.get('status', '')
-                            if status_val != '4':  # 只处理已完赛
+                        for (fid, home_team, away_team, match_date), score in zip(finished_rows, scores):
+                            if score is None:
                                 continue
-
-                            parts = gy.split(',')
-                            if len(parts) < 3:
-                                continue
-                            home_team = parts[1].strip()
-                            away_team = parts[2].strip()
-
-                            # 比分在 class="red" 的 td 里，格式 "1 - 1"
-                            score_td = row.find('td', class_='red')
-                            if not score_td:
-                                continue
-                            score_text = score_td.get_text(strip=True)
-                            score_match = re.match(r'^(\d+)\s*-\s*(\d+)$', score_text)
-                            if not score_match:
-                                continue
-                            home_goals = int(score_match.group(1))
-                            away_goals = int(score_match.group(2))
-
-                            # 比赛日期从 td 文本提取，格式 "04-10 00:00"
-                            match_date = None
-                            for td in row.find_all('td'):
-                                td_text = td.get_text(strip=True)
-                                dm = re.match(r'^(\d{2}-\d{2})\s+\d{2}:\d{2}$', td_text)
-                                if dm:
-                                    match_date = date(today.year, int(dm.group(1).split('-')[0]), int(dm.group(1).split('-')[1]))
-                                    break
-
+                            home_goals, away_goals = score
                             result = await conn.execute("""
                                 UPDATE matches_live
                                 SET home_goals = $3, away_goals = $4,
