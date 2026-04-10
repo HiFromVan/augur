@@ -2011,7 +2011,7 @@ async def get_predictions_list(
         offset_param = f"${param_count}"
         params.extend([limit, offset])
 
-        order_clause = "m.date ASC" if status == "pending" else "pr.predicted_at DESC"
+        order_clause = "m.date ASC" if status == "pending" else "m.date DESC"
 
         data_query = f"""
             SELECT
