@@ -154,15 +154,7 @@ export function MatchCard({ match }: MatchCardProps) {
                 </span>
               </>
             ) : (
-              <>
-                <span className="text-3xl font-bold tabular-nums" style={{ color: leagueColor }}>
-                  {match.pred_score_home ?? 1}
-                </span>
-                <span className="text-2xl font-bold text-muted-foreground">-</span>
-                <span className="text-3xl font-bold tabular-nums text-rose-500">
-                  {match.pred_score_away ?? 1}
-                </span>
-              </>
+              <span className="text-sm text-muted-foreground">VS</span>
             )}
           </div>
 

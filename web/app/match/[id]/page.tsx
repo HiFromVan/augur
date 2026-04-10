@@ -173,11 +173,6 @@ export default function MatchDetailPage() {
                     <div className="text-5xl font-black tracking-tighter text-[#3f3bbd]" style={{ fontFamily: 'Manrope, sans-serif' }}>
                       VS
                     </div>
-                    {prediction && prediction.pred_score_home !== undefined && prediction.pred_score_away !== undefined && (
-                      <div className="text-sm text-slate-400 font-medium" style={{ fontFamily: 'Inter, sans-serif' }}>
-                        预测比分 {prediction.pred_score_home} - {prediction.pred_score_away}
-                      </div>
-                    )}
                   </>
                 )}
               </div>

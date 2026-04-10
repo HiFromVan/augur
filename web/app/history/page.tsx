@@ -308,11 +308,6 @@ export default function HistoryPage() {
                           <p className="text-muted-foreground text-xs">
                             主{(pred.pred_home * 100).toFixed(1)}% / 平{(pred.pred_draw * 100).toFixed(1)}% / 客{(pred.pred_away * 100).toFixed(1)}%
                           </p>
-                          {pred.pred_score_home !== null && pred.pred_score_away !== null && (
-                            <p className="text-muted-foreground">
-                              比分: {pred.pred_score_home}-{pred.pred_score_away}
-                            </p>
-                          )}
                         </div>
                         <div>
                           <p className="text-muted-foreground mb-1">实际:</p>
