@@ -32,10 +32,10 @@ wheels/
 *~
 
 # 模型文件
-models/*.cbm
-models/*.pkl
-models/*.pt
-models/*.json
+# models/*.cbm
+# models/*.pkl
+# models/*.pt
+# models/*.json
 
 # 数据
 *.db
