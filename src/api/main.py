@@ -2011,6 +2011,8 @@ async def get_predictions_list(
         offset_param = f"${param_count}"
         params.extend([limit, offset])
 
+        order_clause = "m.date ASC" if status == "pending" else "pr.predicted_at DESC"
+
         data_query = f"""
             SELECT
                 pr.*,
@@ -2027,7 +2029,7 @@ async def get_predictions_list(
             FROM prediction_records pr
             JOIN matches_live m ON pr.match_live_id = m.id
             WHERE {where_clause}
-            ORDER BY pr.predicted_at DESC
+            ORDER BY {order_clause}
             LIMIT {limit_param} OFFSET {offset_param}
         """
 
