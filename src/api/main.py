@@ -1975,11 +1975,7 @@ async def get_predictions_list(
         elif status == "incorrect":
             conditions.append("pr.is_correct = false AND pr.evaluated_at IS NOT NULL")
         elif status == "pending":
-            conditions.append("pr.evaluated_at IS NULL AND m.status != 'finished' AND m.date < NOW() + INTERVAL '8 hours'")
-        elif status == "evaluated":
-            conditions.append("pr.evaluated_at IS NOT NULL")
-        elif status == "finished":
-            conditions.append("m.status = 'finished'")
+            conditions.append("m.home_goals IS NULL AND m.date < NOW() + INTERVAL '8 hours'")
 
         if league != "all":
             param_count += 1
