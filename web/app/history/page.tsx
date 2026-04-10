@@ -73,7 +73,7 @@ export default function HistoryPage() {
   const [loading, setLoading] = useState(true);
   const [page, setPage] = useState(1);
   const [totalPages, setTotalPages] = useState(1);
-  const [statusFilter, setStatusFilter] = useState<string>("evaluated");
+  const [statusFilter, setStatusFilter] = useState<string>("pending");
 
   useEffect(() => {
     fetchData();
@@ -238,24 +238,14 @@ export default function HistoryPage() {
               <span>🎯 预测记录</span>
               <div className="flex gap-2">
                 <button
-                  onClick={() => setStatusFilter("evaluated")}
+                  onClick={() => setStatusFilter("pending")}
                   className={`px-3 py-1 text-sm rounded-md ${
-                    statusFilter === "evaluated"
+                    statusFilter === "pending"
                       ? "bg-primary text-primary-foreground"
                       : "bg-secondary text-secondary-foreground"
                   }`}
                 >
-                  已结束
-                </button>
-                <button
-                  onClick={() => setStatusFilter("all")}
-                  className={`px-3 py-1 text-sm rounded-md ${
-                    statusFilter === "all"
-                      ? "bg-primary text-primary-foreground"
-                      : "bg-secondary text-secondary-foreground"
-                  }`}
-                >
-                  全部
+                  待评估
                 </button>
                 <button
                   onClick={() => setStatusFilter("correct")}
@@ -278,14 +268,14 @@ export default function HistoryPage() {
                   错误
                 </button>
                 <button
-                  onClick={() => setStatusFilter("pending")}
+                  onClick={() => setStatusFilter("all")}
                   className={`px-3 py-1 text-sm rounded-md ${
-                    statusFilter === "pending"
+                    statusFilter === "all"
                       ? "bg-primary text-primary-foreground"
                       : "bg-secondary text-secondary-foreground"
                   }`}
                 >
-                  待评估
+                  全部
                 </button>
               </div>
             </CardTitle>
