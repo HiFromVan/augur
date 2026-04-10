@@ -51,51 +51,8 @@ export function MatchCard({ match }: MatchCardProps) {
   // 生成AI预测说明
   const getPredictionReason = () => {
     if (isFinished) return null;
-
-    // 优先使用AI生成的说明
-    if (match.ai_explanation) {
-      return match.ai_explanation;
-    }
-
-    // 降级方案：生成简单说明
-    const homeWinProb = Math.round(predHome * 100);
-    const drawProb = Math.round(predDraw * 100);
-    const awayWinProb = Math.round(predAway * 100);
-
-    let reason = "基于";
-    const factors = [];
-
-    // 判断主要预测结果
-    if (homeWinProb > drawProb && homeWinProb > awayWinProb) {
-      reason = `预测${homeTeamName}获胜，`;
-      if (homeWinProb > 50) {
-        factors.push("主场优势明显");
-      }
-    } else if (awayWinProb > drawProb && awayWinProb > homeWinProb) {
-      reason = `预测${awayTeamName}客场取胜，`;
-      if (awayWinProb > 45) {
-        factors.push("客队实力占优");
-      }
-    } else {
-      reason = "双方实力接近，";
-      factors.push("平局可能性较大");
-    }
-
-    // 添加其他因素
-    if (match.expected_goals_home && match.expected_goals_away) {
-      const goalDiff = Math.abs(match.expected_goals_home - match.expected_goals_away);
-      if (goalDiff < 0.5) {
-        factors.push("预期进球数相近");
-      } else if (goalDiff > 1.5) {
-        factors.push("进攻火力差距明显");
-      }
-    }
-
-    if (factors.length === 0) {
-      factors.push("综合历史数据与当前状态分析");
-    }
-
-    return reason + factors.join("，");
+    if (match.ai_explanation) return match.ai_explanation;
+    return "AI 预测说明正在生成中，请稍后刷新查看详细分析...";
   };
 
   const predictionReason = getPredictionReason();

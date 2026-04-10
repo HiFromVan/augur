@@ -991,7 +991,7 @@ async def generate_ai_explanation_async(
 ):
     """异步生成 AI 预测说明"""
     try:
-        def safe_pi(val, default=1000.0):
+        def safe_pi(val, default=0.0):
             try:
                 v = float(val)
                 if abs(v) > 9999 or v != v:
@@ -1058,7 +1058,7 @@ async def generate_media_analysis_async(
 ):
     """异步生成媒体分析 - 基于网络搜索的真实新闻"""
     try:
-        def safe_pi(val, default=1000.0):
+        def safe_pi(val, default=0.0):
             try:
                 v = float(val)
                 if abs(v) > 9999 or v != v:
@@ -1262,7 +1262,7 @@ async def match_detail(match_id: int):
             t = ih + id_ + ia
             implied_home, implied_draw, implied_away = ih/t, id_/t, ia/t
 
-        def safe_pi(val, default=1000.0):
+        def safe_pi(val, default=0.0):
             try:
                 v = float(val)
                 if abs(v) > 9999 or v != v:
@@ -1271,8 +1271,8 @@ async def match_detail(match_id: int):
             except Exception:
                 return default
 
-        home_pi = pi_ratings_cache.get(home, {'attack': 1000, 'defense': 1000})
-        away_pi = pi_ratings_cache.get(away, {'attack': 1000, 'defense': 1000})
+        home_pi = pi_ratings_cache.get(home, {'attack': 0, 'defense': 0})
+        away_pi = pi_ratings_cache.get(away, {'attack': 0, 'defense': 0})
 
         # 获取 AI 预测说明（如果已存在）
         ai_explanation = await conn.fetchval(
