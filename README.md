@@ -1,126 +1,102 @@
 # Augur · 识机
 
-> 足球比赛智能预测系统 — AI 驱动的足球结果预测平台
+**ML-powered football match prediction for Chinese leagues.**
 
-**线上地址：[https://zooming-cat-production.up.railway.app](https://zooming-cat-production.up.railway.app)**
+🔮 **Live demo → [zooming-cat-production.up.railway.app](https://zooming-cat-production.up.railway.app)**
 
-## 项目简介
+---
 
-Augur（识机）是一个针对国内足球赛事（中超、中甲、亚冠、世界杯亚预赛等）的机器学习预测系统，结合学术界最新研究成果与工程实践，提供胜平负概率、比分预测及 AI 赛事分析。
+Augur combines Pi-Ratings, CatBoost, and Poisson regression to predict match outcomes and scorelines for CSL, China League One, AFC Champions League, and World Cup qualifiers. Named after the Roman augurs — priests who read patterns in nature to forecast the future.
 
-> Augur，古罗马占卜师，通过观察自然规律预判未来。识机，识别时机，在变化发生前洞察先机。
+## Features
 
-## 功能
+- **Win/Draw/Loss probabilities** — CatBoost classifier trained on Pi-Ratings + form + implied odds
+- **Scoreline prediction** — Poisson regression on expected goals
+- **AI match analysis** — pre-match breakdowns via Claude API
+- **Prediction history** — track pending, correct, and incorrect calls
+- **Strength comparison** — Pi-Ratings delta between opponents
+- **Auto-updates** — scheduler pulls fixtures and scores, re-runs predictions
 
-- **胜平负预测**：基于 CatBoost + Pi-Ratings 特征工程，输出主胜/平局/客胜概率
-- **比分预测**：泊松回归模型预测进球数
-- **AI 赛事分析**：接入 Claude API，生成赛前分析文字
-- **历史预测记录**：查看待评估、已命中、未命中的历史预测
-- **实力对比**：展示双方 Pi-Ratings 实力差值
-- **自动更新**：Scheduler 定时抓取赛程、比分，更新预测
+## Stack
 
-## 技术栈
+| Layer | Tech |
+|-------|------|
+| Data collection | Python scrapers (zqcf, football-data.co.uk) |
+| Storage | PostgreSQL |
+| Feature engineering | Pi-Ratings + recent form + odds-implied probabilities |
+| Models | CatBoost (outcome) + Poisson regression (score) |
+| AI analysis | Anthropic Claude API |
+| Backend | FastAPI |
+| Frontend | Next.js + Tailwind CSS |
+| Deploy | Railway |
 
-| 层级 | 选型 |
-|------|------|
-| 数据采集 | Python + 自定义爬虫（足球数据、球探网） |
-| 数据存储 | PostgreSQL |
-| 特征工程 | Pi-Ratings + 近期状态 + 赔率隐含概率 |
-| 预测模型 | CatBoost（胜平负）+ 泊松回归（比分） |
-| AI 分析 | Anthropic Claude API |
-| 后端 API | FastAPI |
-| 前端 | Next.js + Tailwind CSS |
-| 部署 | Railway（后端 + 前端 + 定时任务） |
-
-## 项目结构
+## Project structure
 
 ```
 augur/
 ├── src/
 │   ├── api/
-│   │   ├── main.py              # FastAPI 后端入口
-│   │   └── score_predictor.py   # 比分预测接口
+│   │   ├── main.py                  # FastAPI app
+│   │   └── score_predictor.py       # score prediction endpoint
 │   ├── data/
-│   │   ├── schema.py            # 数据模型
-│   │   ├── database.py          # PostgreSQL 操作
-│   │   ├── scraper_zqcf.py      # 足球数据爬虫
+│   │   ├── schema.py
+│   │   ├── database.py
+│   │   ├── scraper_zqcf.py          # fixture/score scraper
 │   │   └── scraper_footballdata_co.py
 │   ├── models/
-│   │   ├── predictor.py         # CatBoost 预测器
-│   │   ├── poisson_predictor.py # 泊松比分预测
-│   │   └── feature_engineer.py  # 特征工程
-│   ├── adapters/                # 数据源适配器
-│   ├── scheduler.py             # 定时任务
-│   ├── train.py                 # 模型训练
-│   └── generate_ai_analysis.py  # AI 分析生成
-├── web/                         # Next.js 前端
+│   │   ├── predictor.py             # CatBoost wrapper
+│   │   ├── poisson_predictor.py
+│   │   └── feature_engineer.py
+│   ├── adapters/
+│   ├── scheduler.py                 # cron jobs
+│   ├── train.py
+│   └── generate_ai_analysis.py
+├── web/                             # Next.js frontend
 │   └── app/
-│       ├── page.tsx             # 首页（今日赛程）
-│       ├── match/               # 比赛详情页
-│       ├── history/             # 历史预测页
-│       ├── account/             # 用户账户
-│       └── pricing/             # 订阅定价
-├── models/                      # 训练好的模型文件
+│       ├── page.tsx                 # today's fixtures
+│       ├── match/                   # match detail
+│       ├── history/                 # prediction history
+│       ├── account/
+│       └── pricing/
+├── models/                          # serialized model files
 ├── Dockerfile
 ├── Dockerfile.scheduler
 └── railway.toml
 ```
 
-## 本地开发
-
-### 1. 安装依赖
+## Getting started
 
 ```bash
+# backend
 pip install -r requirements.txt
-cd web && npm install
-```
-
-### 2. 配置环境变量
-
-```bash
 export DATABASE_URL="postgresql://localhost:5432/augur"
-export ANTHROPIC_API_KEY="your_key"
-```
-
-### 3. 启动后端
-
-```bash
+export ANTHROPIC_API_KEY="sk-..."
 uvicorn src.api.main:app --reload
+
+# frontend
+cd web && npm install && npm run dev
 ```
 
-### 4. 启动前端
+## Status
 
-```bash
-cd web && npm run dev
-```
+- [x] FastAPI backend
+- [x] Next.js frontend
+- [x] CatBoost win/draw/loss prediction
+- [x] Poisson scoreline prediction
+- [x] Pi-Ratings feature engineering
+- [x] Automated fixture + score ingestion
+- [x] Prediction history & evaluation
+- [x] AI match analysis (Claude)
+- [x] User accounts & subscription
+- [x] Deployed on Railway
 
-## 项目状态
+## References
 
-- [x] FastAPI 后端
-- [x] Next.js 前端
-- [x] CatBoost 胜平负预测
-- [x] 泊松回归比分预测
-- [x] Pi-Ratings 特征工程
-- [x] 自动抓取赛程与比分
-- [x] 历史预测记录与评估
-- [x] AI 赛事分析（Claude）
-- [x] 用户账户与订阅系统
-- [x] Railway 部署上线
-
-## 文档
-
-- [产品交互设计](docs/design/product-design.md)
-- [模型设计方案](docs/design/model-design.md)
-- [数据获取策略](docs/design/data-strategy.md)
-- [系统架构设计](docs/design/system-architecture.md)
-
-## 参考资源
-
-- [arXiv:2403.07669](https://arxiv.org/abs/2403.07669) — ML for Soccer Match Result Prediction (2024 综述)
+- [arXiv:2403.07669](https://arxiv.org/abs/2403.07669) — ML for Soccer Match Result Prediction (2024 survey)
 - [arXiv:2309.14807](https://arxiv.org/abs/2309.14807) — CatBoost + pi-ratings benchmark
-- [lucasmaystre/kickscore](https://github.com/lucasmaystre/kickscore) — Bayesian 动态评分引擎
-- [soccerdata](https://github.com/probberechts/soccerdata) — 足球数据爬虫封装
+- [lucasmaystre/kickscore](https://github.com/lucasmaystre/kickscore) — Bayesian dynamic rating engine
+- [soccerdata](https://github.com/probberechts/soccerdata) — football data scraping toolkit
 
-## 许可证
+## License
 
 [AGPL-3.0](LICENSE)
