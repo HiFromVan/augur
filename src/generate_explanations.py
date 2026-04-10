@@ -142,7 +142,7 @@ async def generate_explanation(match_id: int, data: dict) -> str:
 async def save_explanation(conn, match_id: int, explanation: str):
     """保存说明到数据库"""
     await conn.execute("""
-        UPDATE matches
+        UPDATE matches_live
         SET ai_explanation = $1,
             explanation_generated_at = $2
         WHERE id = $3
@@ -157,14 +157,14 @@ async def process_matches(limit: int = 10, regenerate: bool = False):
         # 获取需要生成说明的比赛
         if regenerate:
             query = """
-                SELECT id FROM matches
+                SELECT id FROM matches_live
                 WHERE home_goals IS NULL
                 ORDER BY date ASC
                 LIMIT $1
             """
         else:
             query = """
-                SELECT id FROM matches
+                SELECT id FROM matches_live
                 WHERE home_goals IS NULL
                   AND ai_explanation IS NULL
                 ORDER BY date ASC

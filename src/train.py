@@ -341,16 +341,8 @@ async def main():
     y_home_test = []
     y_away_test = []
 
-    for match in all_matches:
-        features = engineer.extract_features(
-            match['home_team'],
-            match['away_team'],
-            match['league'],
-            match['date'],
-            pi_ratings,
-            team_index,
-            h2h_index
-        )
+    for match in matches:
+        features = build_features(match, pi_ratings, team_index, h2h_index)
 
         if features is None:
             continue
@@ -358,7 +350,7 @@ async def main():
         home_goals = float(match['home_goals'])
         away_goals = float(match['away_goals'])
 
-        if match['date'] < split_date:
+        if str(match['date'])[:10] < split_date:
             X_goals_train.append(features)
             y_home_train.append(home_goals)
             y_away_train.append(away_goals)

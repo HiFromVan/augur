@@ -7,8 +7,8 @@ from src.adapters import FootballDataAdapter
 from src.data import Database
 
 
-DATABASE_URL = "postgresql://augur:augur@localhost:5432/augur"
-API_KEY = os.getenv("FOOTBALL_DATA_KEY", "acf9e170e02f4679a5ae76c3dd1f2621")
+DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://augur:augur@localhost:5432/augur")
+API_KEY = os.getenv("FOOTBALL_DATA_KEY", "")
 
 
 async def fetch_historical_data():

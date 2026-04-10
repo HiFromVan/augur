@@ -140,7 +140,7 @@ class Database:
         status: 'all' | 'finished' | 'scheduled'
         """
         async with self.pool.acquire() as conn:
-            query = "SELECT * FROM matches WHERE 1=1"
+            query = "SELECT * FROM matches_history WHERE 1=1"
             params = []
             param_count = 0
 

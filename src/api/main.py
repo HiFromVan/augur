@@ -5,7 +5,8 @@ Augur FastAPI 后端
 
 import os
 import sys
-from datetime import datetime, date, timedelta
+import json
+from datetime import datetime, date, timedelta, timezone
 from pathlib import Path
 
 # 项目根目录
@@ -43,7 +44,11 @@ PI_RATINGS_PATH = str(MODEL_DIR / "pi_ratings_v1.json")
 
 # Anthropic API
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
-anthropic_client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY) if ANTHROPIC_API_KEY else None
+ANTHROPIC_BASE_URL = os.getenv("ANTHROPIC_BASE_URL", "")
+anthropic_client = anthropic.Anthropic(
+    api_key=ANTHROPIC_API_KEY,
+    base_url=ANTHROPIC_BASE_URL if ANTHROPIC_BASE_URL else None
+) if ANTHROPIC_API_KEY else None
 
 # ============ Pydantic 模型 ============
 
@@ -58,6 +63,7 @@ class MatchPrediction(BaseModel):
     away_team_cn: str
     home_goals: Optional[int]
     away_goals: Optional[int]
+    status: str = 'pending'  # pending, live, finished
 
     # 赔率
     odds_home: float
@@ -85,6 +91,9 @@ class MatchPrediction(BaseModel):
     pred_score_away: Optional[int] = None
     expected_goals_home: Optional[float] = None
     expected_goals_away: Optional[float] = None
+
+    # AI 预测说明
+    ai_explanation: Optional[str] = None
 
     model_name: str
 
@@ -182,7 +191,7 @@ pool: Optional[asyncpg.Pool] = None
 # 缓存
 prediction_cache: Optional[dict] = None
 cache_timestamp: Optional[datetime] = None
-CACHE_DURATION_MINUTES = 10  # 缓存10分钟
+CACHE_DURATION_MINUTES = 5  # 缓存5分钟
 
 
 async def get_pool() -> asyncpg.Pool:
@@ -206,7 +215,7 @@ async def fetch_historical_matches(limit: int = 500) -> List[dict]:
         rows = await conn.fetch("""
             SELECT date, league, home_team, away_team,
                    home_goals, away_goals, odds_home, odds_draw, odds_away
-            FROM matches
+            FROM matches_history
             WHERE home_goals IS NOT NULL
             ORDER BY date DESC
             LIMIT $1
@@ -318,9 +327,11 @@ def build_features(match: dict, all_matches: List[dict]) -> dict:
     else:
         match_dt = match['date']
 
-    # Pi-Ratings
-    hr = pi_ratings_cache.get(home, {'attack': 0.0, 'defense': 0.0})
-    ar = pi_ratings_cache.get(away, {'attack': 0.0, 'defense': 0.0})
+    # Pi-Ratings（中文队名先通过别名映射转换为英文）
+    home_en = team_aliases_cache.get(home, home)
+    away_en = team_aliases_cache.get(away, away)
+    hr = pi_ratings_cache.get(home_en, pi_ratings_cache.get(home, {'attack': 0.0, 'defense': 0.0}))
+    ar = pi_ratings_cache.get(away_en, pi_ratings_cache.get(away, {'attack': 0.0, 'defense': 0.0}))
 
     pi_diff = (hr['attack'] - ar['defense']) - (ar['attack'] - hr['defense'])
 
@@ -359,35 +370,35 @@ CHINESE_TO_ENGLISH = {
     '阿森纳': 'Arsenal', '阿仙奴': 'Arsenal',
     '切尔西': 'Chelsea', '曼联': 'Man United', '曼城': 'Man City',
     '利物浦': 'Liverpool', '热刺': 'Tottenham', '纽卡斯尔': 'Newcastle',
-    '阿斯顿维拉': 'Aston Villa', '西汉姆': 'West Ham', '狼队': 'Wolverhampton',
-    '布莱顿': 'Brighton Hove', '水晶宫': 'Crystal Palace', '富勒姆': 'Fulham',
+    '阿斯顿维拉': 'Aston Villa', '西汉姆': 'West Ham', '西汉姆联': 'West Ham', '狼队': 'Wolves',
+    '布莱顿': 'Brighton', '水晶宫': 'Crystal Palace', '富勒姆': 'Fulham',
     '布伦特福德': 'Brentford', '伯恩利': 'Burnley', '埃弗顿': 'Everton',
-    '伯恩茅斯': 'Bournemouth', '诺丁汉': 'Nottingham', '莱斯特': 'Leicester City',
+    '伯恩茅斯': 'Bournemouth', '诺丁汉': "Nott'm Forest", '莱斯特': 'Leicester',
     # 英冠 — 对应数据库名
     '米堡': 'Middlesbrough', '米尔沃尔': 'Millwall',
     '伯明翰': 'Birmingham', '布莱克本': 'Blackburn',
     '女王巡游': 'QPR', '沃特福德': 'Watford',
     '诺维奇': 'Norwich', '朴次茅斯': 'Portsmouth',
-    '西布罗姆': 'West Brom', '雷克斯': 'Luton Town',
-    '考文垂': 'Coventry City', '德比郡': 'Derby County',
-    '谢菲尔德联': 'Sheffield Utd', '谢菲尔德周三': 'Sheffield Wed',
+    '西布罗姆': 'West Brom', '雷克斯': 'Luton',
+    '考文垂': 'Coventry', '德比郡': 'Derby',
+    '谢菲尔德联': 'Sheffield United', '谢菲尔德周三': 'Sheffield Weds',
     '斯旺西': 'Swansea', '桑德兰': 'Sunderland', '斯托克': 'Stoke',
-    '普利茅斯': 'Plymouth Arg', '普雷斯顿': 'Preston NE',
+    '普利茅斯': 'Plymouth', '普雷斯顿': 'Preston',
     '卡迪夫': 'Cardiff', '布里斯托城': 'Bristol City', '查尔顿': 'Charlton',
-    '赫尔城': 'Hull City', '伊普斯维奇': 'Ipswich Town', '利兹联': 'Leeds United',
-    '莱斯特城': 'Leicester City', '牛津联': 'Oxford United', '雷克瑟姆': 'Wrexham',
+    '赫尔城': 'Hull', '伊普斯维奇': 'Ipswich', '利兹联': 'Leeds',
+    '莱斯特城': 'Leicester', '牛津联': 'Oxford', '雷克瑟姆': 'Wrexham',
     '南安普顿': 'Southampton',
     # 英甲
-    '维冈': 'Wigan Athletic', '莱顿东方': 'Leyton Orient',
+    '维冈': 'Wigan', '莱顿东方': 'Leyton Orient',
     # 欧冠/欧联（补充非五大联赛球队）
-    '皇马': 'Real Madrid', '巴萨': 'Barça',
+    '皇马': 'Real Madrid', '巴萨': 'Barcelona',
     # 西甲 — 对应数据库名
-    '巴列卡诺': 'Rayo Vallecano', '埃尔切': 'Elche',
-    '塞维利亚': 'Sevilla FC', '毕尔巴鄂': 'Athletic', '皇家社会': 'Real Sociedad',
-    '贝蒂斯': 'Real Betis', '瓦伦西亚': 'Valencia', '比利亚雷亚尔': 'Villarreal',
-    '马德里竞技': 'Atleti', '赫罗纳': 'Girona', '奥萨苏纳': 'Osasuna',
-    '赫塔费': 'Getafe', '西班牙人': 'Espanyol', '阿拉维斯': 'Alavés',
-    '塞尔塔': 'Celta', '马洛卡': 'Mallorca', '莱加内斯': 'Leganés',
+    '巴列卡诺': 'Vallecano', '埃尔切': 'Elche',
+    '塞维利亚': 'Sevilla', '毕尔巴鄂': 'Ath Bilbao', '皇家社会': 'Sociedad',
+    '贝蒂斯': 'Betis', '瓦伦西亚': 'Valencia', '比利亚雷亚尔': 'Villarreal',
+    '马德里竞技': 'Ath Madrid', '赫罗纳': 'Girona', '奥萨苏纳': 'Osasuna',
+    '赫塔费': 'Getafe', '西班牙人': 'Espanol', '阿拉维斯': 'Alaves',
+    '塞尔塔': 'Celta', '马洛卡': 'Mallorca', '莱加内斯': 'Leganes',
     '巴拉多利德': 'Valladolid', '拉斯帕尔马斯': 'Las Palmas',
     # 意甲 — 对应数据库名
     '亚特兰大': 'Atalanta', '国际米兰': 'Inter', '尤文图斯': 'Juventus',
@@ -398,30 +409,30 @@ CHINESE_TO_ENGLISH = {
     '帕尔马': 'Parma', '维罗纳': 'Verona', '科莫': 'Como 1907',
     '蒙扎': 'Monza', '威尼斯': 'Venezia',
     # 德甲 — 对应数据库名
-    '拜仁': 'Bayern', '多特蒙德': 'Dortmund', '莱比锡': 'RB Leipzig',
-    '勒沃库森': 'Leverkusen', '法兰克福': 'Frankfurt', '弗莱堡': 'Freiburg',
+    '拜仁': 'Bayern Munich', '多特蒙德': 'Dortmund', '莱比锡': 'RB Leipzig',
+    '勒沃库森': 'Leverkusen', '法兰克福': 'Ein Frankfurt', '弗莱堡': 'Freiburg', '弗赖堡': 'Freiburg',
     '霍芬海姆': 'Hoffenheim', '门兴': "M'gladbach", '沃尔夫斯堡': 'Wolfsburg',
     '斯图加特': 'Stuttgart', '柏林联合': 'Union Berlin', '美因茨': 'Mainz',
-    '奥格斯堡': 'Augsburg', '不来梅': 'Bremen', '科隆': '1. FC Köln',
-    '海登海姆': 'Heidenheim', '圣保利': 'St. Pauli', '汉堡': 'HSV',
+    '奥格斯堡': 'Augsburg', '不来梅': 'Werder Bremen', '科隆': 'FC Koln',
+    '海登海姆': 'Heidenheim', '圣保利': 'St Pauli', '汉堡': 'Hamburg',
     # 法甲 — 对应数据库名
-    '巴黎圣曼': 'PSG', '图卢兹': 'Toulouse', '里尔': 'Lille',
-    '里昂': 'Olympique Lyon', '马赛': 'Marseille', '摩纳哥': 'Monaco',
-    '朗斯': 'RC Lens', '雷恩': 'Stade Rennais', '尼斯': 'Nice',
-    '南特': 'Nantes', '布雷斯特': 'Brest', '斯特拉斯堡': 'Strasbourg',
-    '昂热': 'Angers SCO', '勒阿弗尔': 'Le Havre', '欧塞尔': 'Auxerre',
+    '巴黎圣曼': 'Paris SG', '图卢兹': 'Toulouse', '里尔': 'Lille',
+    '里昂': 'Lyon', '马赛': 'Marseille', '摩纳哥': 'Monaco',
+    '朗斯': 'Lens', '雷恩': 'Rennes', '尼斯': 'Nice',
+    '南特': 'Nantes', '布雷斯特': 'Brest', '斯特拉斯': 'Strasbourg', '斯特拉斯堡': 'Strasbourg',
+    '昂热': 'Angers', '勒阿弗尔': 'Le Havre', '欧塞尔': 'Auxerre',
     '圣旺红星': 'Red Star',
     # 法乙
     '拉瓦勒': 'Laval',
     # 葡超 — 对应数据库名
     '里斯本竞技': 'Sporting CP', '圣克拉拉': 'Santa Clara',
-    '本菲卡': 'SL Benfica', '波尔图': 'Porto', '布拉加': 'Braga',
-    '吉尔维森特': 'Gil Vicente', '阿罗卡': 'Arouca', '法马利康': 'Famalicão',
-    '维多利亚': 'Vitória SC', '里奥阿维': 'Rio Ave', '卡萨皮亚': 'Casa Pia',
+    '本菲卡': 'Benfica', '波尔图': 'Porto', '布拉加': 'Sp Braga',
+    '吉尔维森特': 'Gil Vicente', '阿罗卡': 'Arouca', '法马利康': 'Famalicao', '摩雷伦斯': 'Moreirense',
+    '维多利亚': 'Vitoria SC', '里奥阿维': 'Rio Ave', '卡萨皮亚': 'Casa Pia',
     # 荷甲 — 对应数据库名
-    '阿贾克斯': 'Ajax', '费耶诺德': 'Feyenoord', '埃因霍温': 'PSV',
-    '阿尔克马尔': 'AZ', '特温特': 'Twente', '乌得勒支': 'Utrecht',
-    '海伦芬': 'Heerenveen', '斯巴达': 'Sparta', '格罗宁根': 'Groningen',
+    '阿贾克斯': 'Ajax', '费耶诺德': 'Feyenoord', '埃因霍温': 'PSV Eindhoven',
+    '阿尔克马尔': 'AZ Alkmaar', '特温特': 'Twente', '乌得勒支': 'Utrecht',
+    '海伦芬': 'Heerenveen', '斯巴达': 'Sparta Rotterdam', '格罗宁根': 'Groningen',
     # 澳超
     '阿德莱德': 'Adelaide United', '奥克兰FC': 'Auckland FC',
     # 沙特
@@ -442,6 +453,63 @@ def to_chinese_name(name: str) -> str:
 
 
 # ============ 500.com 爬虫 ============
+
+async def fetch_live_scores(target_date: date) -> Dict[int, dict]:
+    """
+    从500.com获取实时比分
+    返回: {match_id: {'home_goals': int, 'away_goals': int, 'status': str}}
+    """
+    date_str = target_date.strftime('%Y%m%d')
+    url = f"https://live.500.com/static/info/bifen/xml/livedata/jczq/{date_str}Full.txt"
+
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get(url)
+            if resp.status_code != 200:
+                return {}
+
+            # 解析JSON数据
+            data = json.loads(resp.text)
+            scores = {}
+
+            for match in data:
+                if len(match) < 5:
+                    continue
+
+                match_id = match[0]
+                if match_id <= 0:  # 跳过无效ID
+                    continue
+
+                # 解析比分: "半场,全场,角球,黄牌"
+                home_score_parts = match[2].split(',')
+                away_score_parts = match[3].split(',')
+                update_time = match[4]
+
+                # 获取全场比分（第2个字段，索引1）
+                home_goals = int(home_score_parts[1]) if len(home_score_parts) > 1 else None
+                away_goals = int(away_score_parts[1]) if len(away_score_parts) > 1 else None
+
+                # 判断比赛状态
+                # 如果更新时间是1900-01-01，说明比赛已结束
+                # 否则是进行中
+                if update_time.startswith('1900-01-01'):
+                    status = 'finished'
+                elif update_time.startswith('2015') or update_time.startswith('2026'):
+                    status = 'live'
+                else:
+                    status = 'finished'
+
+                scores[match_id] = {
+                    'home_goals': home_goals,
+                    'away_goals': away_goals,
+                    'status': status
+                }
+
+            return scores
+    except Exception as e:
+        print(f"Error fetching live scores: {e}")
+        return {}
+
 
 async def scrape_fivehundred(target_date: date) -> List[dict]:
     """爬取 500.com 当日比赛 + 赔率"""
@@ -476,11 +544,12 @@ async def scrape_fivehundred(target_date: date) -> List[dict]:
             league_cn = row.get('data-simpleleague', '')
             match_num = row.get('data-matchnum', '')
 
-            # 规范化球队名（中文 → 英文）
+            # 规范化球队名（中文 → 英文，如果没有映射则保留中文）
             home_en = normalize_team_name(home)
             away_en = normalize_team_name(away)
 
-            if not home_en or not away_en:
+            # 只要有球队名就继续（允许中文名）
+            if not home_en or not away_en or not home or not away:
                 continue
 
             odds_cell = row.find('td', class_='td-betbtn')
@@ -514,7 +583,7 @@ async def scrape_fivehundred(target_date: date) -> List[dict]:
                 'away_team_cn': away,
                 'date': f"{match_date}T{match_time}:00",
                 'league_cn': league_cn,
-                'match_num': match_num,
+                'match_num': match_num,  # 500.com 赛事ID
                 'odds_home': odds_home,
                 'odds_draw': odds_draw if odds_draw else (odds_home + odds_away) / 2 * 0.95,
                 'odds_away': odds_away,
@@ -533,6 +602,7 @@ poisson_home_model = None
 poisson_away_model = None
 feature_names: list = []
 pi_ratings_cache: dict = {}
+team_aliases_cache: dict = {}  # alias → canonical_name，启动时从 DB 加载
 
 
 def load_assets():
@@ -635,9 +705,10 @@ async def health():
 
 
 @app.get("/api/predict", response_model=PredictResponse)
-async def predict_today():
+async def predict_today(hours: Optional[int] = None):
     """
     获取今日比赛 + 模型预测 + 价值信号（带缓存）
+    hours: 时间范围（小时），None表示返回所有比赛
     """
     global prediction_cache, cache_timestamp
 
@@ -646,6 +717,18 @@ async def predict_today():
     if prediction_cache and cache_timestamp:
         cache_age = (now - cache_timestamp).total_seconds() / 60
         if cache_age < CACHE_DURATION_MINUTES:
+            # 如果有时间范围参数，需要过滤缓存结果
+            if hours is not None:
+                cutoff = now + timedelta(hours=hours)
+                filtered_matches = [
+                    m for m in prediction_cache.matches
+                    if datetime.fromisoformat(m.date) <= cutoff
+                ]
+                return PredictResponse(
+                    matches=filtered_matches,
+                    fetched_at=prediction_cache.fetched_at,
+                    source=prediction_cache.source
+                )
             return prediction_cache
 
     load_assets()  # 确保模型已加载
@@ -661,7 +744,12 @@ async def predict_today():
         cache_timestamp = now
         return result
 
-    # 2. 获取历史比赛用于计算特征
+    # 2. 获取实时比分和状态
+    live_scores_today = await fetch_live_scores(today)
+    live_scores_yesterday = await fetch_live_scores(today - timedelta(days=1))
+    live_scores = {**live_scores_yesterday, **live_scores_today}
+
+    # 3. 获取历史比赛用于计算特征
     hist_matches = await fetch_historical_matches(limit=500)
     model_name = "catboost_v1" if catboost_model else "pi_baseline"
 
@@ -669,28 +757,68 @@ async def predict_today():
     p = await get_pool()
     async with p.acquire() as conn:
         for m in raw_matches:
+            # 检查是否有实时比分数据
+            match_id_500 = m.get('match_id_500')  # 如果爬虫返回了500.com的ID
+            score_data = live_scores.get(match_id_500) if match_id_500 else None
+
+            # 确定比赛状态
+            match_time = datetime.fromisoformat(m['date'])
+            if score_data:
+                status = score_data['status']
+                home_goals = score_data['home_goals']
+                away_goals = score_data['away_goals']
+            elif match_time < now:
+                # 比赛时间已过但没有比分数据，标记为live或finished
+                if (now - match_time).total_seconds() > 7200:  # 超过2小时
+                    status = 'finished'
+                    home_goals = None
+                    away_goals = None
+                else:
+                    status = 'live'
+                    home_goals = None
+                    away_goals = None
+            else:
+                status = 'pending'
+                home_goals = None
+                away_goals = None
+
             await conn.execute("""
-                INSERT INTO matches (date, league, home_team, away_team, odds_home, odds_draw, odds_away, source)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-                ON CONFLICT (date, home_team, away_team, source) DO UPDATE
-                  SET odds_home = EXCLUDED.odds_home,
+                INSERT INTO matches_live (date, league, home_team, away_team, odds_home, odds_draw, odds_away, source, source_match_id, status, home_goals, away_goals)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+                ON CONFLICT (home_team, away_team, date) DO UPDATE
+                  SET date = EXCLUDED.date,
+                      league = EXCLUDED.league,
+                      home_team = EXCLUDED.home_team,
+                      away_team = EXCLUDED.away_team,
+                      odds_home = EXCLUDED.odds_home,
                       odds_draw = EXCLUDED.odds_draw,
-                      odds_away = EXCLUDED.odds_away
+                      odds_away = EXCLUDED.odds_away,
+                      status = EXCLUDED.status,
+                      home_goals = EXCLUDED.home_goals,
+                      away_goals = EXCLUDED.away_goals,
+                      updated_at = NOW()
+                WHERE matches_live.source_match_id IS NOT NULL
             """,
-                datetime.fromisoformat(m['date']),
-                m.get('league', ''),
-                m['home_team'],
-                m['away_team'],
+                match_time,
+                m.get('league_cn', ''),
+                m.get('home_team_cn', m['home_team']),  # 优先使用中文名
+                m.get('away_team_cn', m['away_team']),  # 优先使用中文名
                 m['odds_home'],
                 m['odds_draw'],
                 m['odds_away'],
                 'fivehundred',
+                m.get('match_num'),  # 存储 500.com 赛事ID
+                status,
+                home_goals,
+                away_goals,
             )
         db_rows = await conn.fetch("""
-            SELECT id, home_team, away_team FROM matches
-            WHERE date::date = $1
+            SELECT id, home_team, away_team, ai_explanation, status FROM matches_live
+            WHERE date::date >= $1 AND date::date <= $1 + INTERVAL '2 days' AND source = 'fivehundred'
         """, today)
     db_id_map = {(r['home_team'], r['away_team']): r['id'] for r in db_rows}
+    ai_explanation_map = {(r['home_team'], r['away_team']): r['ai_explanation'] for r in db_rows}
+    status_map = {(r['home_team'], r['away_team']): r['status'] for r in db_rows}
 
     # 3. 预测 + Value 信号
     predictions = []
@@ -720,7 +848,12 @@ async def predict_today():
         value_away = pred['away'] - implied_away
         has_value = value_home > 0.03 or value_draw > 0.03 or value_away > 0.03
 
-        match_id = db_id_map.get((m['home_team'], m['away_team']), m['id'])
+        match_id = db_id_map.get((m['home_team'], m['away_team']))
+        if not match_id:
+            print(f"Warning: No DB ID found for {m['home_team']} vs {m['away_team']}")
+            continue
+        ai_explanation = ai_explanation_map.get((m['home_team'], m['away_team']))
+        match_status = status_map.get((m['home_team'], m['away_team']), 'pending')
 
         predictions.append(MatchPrediction(
             id=match_id,
@@ -733,6 +866,7 @@ async def predict_today():
             away_team_cn=m.get('away_team_cn', m['away_team']),
             home_goals=m['home_goals'],
             away_goals=m['away_goals'],
+            status=match_status,
             odds_home=m['odds_home'],
             odds_draw=m['odds_draw'],
             odds_away=m['odds_away'],
@@ -750,6 +884,7 @@ async def predict_today():
             pred_score_away=pred_score_away,
             expected_goals_home=round(exp_home, 2),
             expected_goals_away=round(exp_away, 2),
+            ai_explanation=ai_explanation,
             model_name=model_name,
         ))
 
@@ -769,6 +904,14 @@ async def predict_today():
         except Exception as e:
             # 记录失败不影响预测返回
             print(f"Failed to save prediction record: {e}")
+
+    # 根据hours参数过滤
+    if hours is not None:
+        cutoff = now + timedelta(hours=hours)
+        predictions = [
+            p for p in predictions
+            if datetime.fromisoformat(p.date) <= cutoff
+        ]
 
     result = PredictResponse(
         matches=predictions,
@@ -840,6 +983,185 @@ async def predict_by_date(date_str: str):
     }
 
 
+async def generate_ai_explanation_async(
+    match_id: int, match_data: dict, pred: dict,
+    home_pi: dict, away_pi: dict, h2h_list: list,
+    hw: int, dr: int, aw: int, avg_goals: float,
+    home_form: list, away_form: list
+):
+    """异步生成 AI 预测说明"""
+    try:
+        def safe_pi(val, default=1000.0):
+            try:
+                v = float(val)
+                if abs(v) > 9999 or v != v:
+                    return default
+                return round(v, 1)
+            except Exception:
+                return default
+
+        explanation_prompt = f"""请为以下足球比赛生成一段简洁的预测说明（150字以内）：
+
+比赛信息：
+- 主队：{match_data.get('home_team_cn', match_data['home_team'])} (Pi评分 - 进攻: {safe_pi(home_pi['attack'])}, 防守: {safe_pi(home_pi['defense'])})
+- 客队：{match_data.get('away_team_cn', match_data['away_team'])} (Pi评分 - 进攻: {safe_pi(away_pi['attack'])}, 防守: {safe_pi(away_pi['defense'])})
+- 联赛：{match_data['league']}
+- 比赛时间：{match_data['date']}
+
+预测结果：
+- 主胜概率：{pred['home']*100:.1f}%
+- 平局概率：{pred['draw']*100:.1f}%
+- 客胜概率：{pred['away']*100:.1f}%
+
+历史交锋：
+- 总计 {len(h2h_list)} 场，主队 {hw} 胜 {dr} 平 {aw} 负
+- 场均进球：{avg_goals:.1f}
+
+近期状态：
+- 主队近5场：{len([f for f in home_form if f['result']=='W'])} 胜 {len([f for f in home_form if f['result']=='D'])} 平 {len([f for f in home_form if f['result']=='L'])} 负
+- 客队近5场：{len([f for f in away_form if f['result']=='W'])} 胜 {len([f for f in away_form if f['result']=='D'])} 平 {len([f for f in away_form if f['result']=='L'])} 负
+
+请用中文生成预测说明，包括：
+1. 双方实力对比
+2. 关键数据分析
+3. 预测倾向及理由
+
+要求简洁专业，不要使用"我认为"等主观表述。"""
+
+        response = anthropic_client.messages.create(
+            model="claude-3-5-haiku-20241022",
+            max_tokens=512,
+            messages=[{"role": "user", "content": explanation_prompt}]
+        )
+
+        ai_explanation = response.content[0].text
+
+        # 保存到数据库
+        pool = await get_pool()
+        async with pool.acquire() as conn:
+            await conn.execute("""
+                UPDATE matches_live
+                SET ai_explanation = $1, ai_explanation_generated_at = NOW()
+                WHERE id = $2
+            """, ai_explanation, match_id)
+
+        print(f"AI explanation generated for match {match_id}")
+
+    except Exception as e:
+        print(f"AI explanation generation error for match {match_id}: {e}")
+
+
+async def generate_media_analysis_async(
+    match_id: int, match_data: dict, pred: dict,
+    home_pi: dict, away_pi: dict, h2h_list: list,
+    home_form: list, away_form: list
+):
+    """异步生成媒体分析 - 基于网络搜索的真实新闻"""
+    try:
+        def safe_pi(val, default=1000.0):
+            try:
+                v = float(val)
+                if abs(v) > 9999 or v != v:
+                    return default
+                return round(v, 1)
+            except Exception:
+                return default
+
+        home_team = match_data.get('home_team_cn', match_data['home_team'])
+        away_team = match_data.get('away_team_cn', match_data['away_team'])
+
+        # 1. 使用Claude搜索球队最近的新闻和动态
+        search_prompt = f"""请搜索并总结以下两支足球队最近的新闻、伤病情况、阵容变化等信息：
+
+主队：{home_team}
+客队：{away_team}
+
+请重点关注：
+1. 最近一周的比赛结果和表现
+2. 关键球员的伤病情况
+3. 主教练的战术调整
+4. 球队士气和更衣室动态
+5. 任何可能影响即将到来比赛的因素
+
+请用简洁的中文总结（150字以内）。"""
+
+        print(f"Searching news for {home_team} and {away_team}...")
+
+        # 使用Claude搜索新闻
+        news_context = ""
+        try:
+            search_response = anthropic_client.messages.create(
+                model="claude-3-5-sonnet-20241022",  # 使用Sonnet以获得更好的搜索能力
+                max_tokens=512,
+                messages=[{"role": "user", "content": search_prompt}]
+            )
+            news_context = search_response.content[0].text
+            print(f"News search completed: {news_context[:100]}...")
+        except Exception as e:
+            print(f"News search failed: {e}")
+            news_context = "暂时无法获取最新新闻信息，将基于历史数据进行分析。"
+
+        # 2. 构建包含新闻信息的分析提示词
+        media_prompt = f"""你是一位专业的足球赛事分析师。请基于以下信息生成一份赛前媒体分析（250-350字）：
+
+比赛信息：
+- 主队：{home_team} vs 客队：{away_team}
+- 联赛：{match_data.get('league_cn', match_data['league'])}
+- 比赛时间：{match_data['date']}
+
+最新媒体动态：
+{news_context}
+
+数据分析：
+- 主队 Pi评分：进攻 {safe_pi(home_pi['attack'])} / 防守 {safe_pi(home_pi['defense'])}
+- 客队 Pi评分：进攻 {safe_pi(away_pi['attack'])} / 防守 {safe_pi(away_pi['defense'])}
+- 预测概率：主胜 {pred['home']*100:.1f}% | 平局 {pred['draw']*100:.1f}% | 客胜 {pred['away']*100:.1f}%
+- 历史交锋：{len(h2h_list)} 场
+- 主队近5场：{len([f for f in home_form if f['result']=='W'])}胜 {len([f for f in home_form if f['result']=='D'])}平 {len([f for f in home_form if f['result']=='L'])}负
+- 客队近5场：{len([f for f in away_form if f['result']=='W'])}胜 {len([f for f in away_form if f['result']=='D'])}平 {len([f for f in away_form if f['result']=='L'])}负
+
+请生成包含以下内容的媒体分析：
+1. **赛前形势**：结合最新新闻，分析双方当前状态和实力对比
+2. **关键因素**：基于媒体报道，指出可能影响比赛的关键因素（伤病、阵容、战术调整等）
+3. **战术预测**：预测双方可能的战术打法和比赛走势
+4. **比赛展望**：给出专业的比赛结果预测
+
+要求：
+- 优先使用最新媒体动态信息
+- 使用专业足球媒体的语言风格
+- 不使用第一人称
+- 内容250-350字"""
+
+        response = anthropic_client.messages.create(
+            model="claude-3-5-haiku-20241022",
+            max_tokens=1024,
+            messages=[{"role": "user", "content": media_prompt}]
+        )
+
+        media_text = response.content[0].text
+
+        # 构建JSON格式的媒体分析
+        media_analysis = {
+            "summary": media_text,
+            "generated_at": datetime.now().isoformat(),
+            "model": "claude-3-5-haiku-20241022"
+        }
+
+        # 保存到数据库
+        pool = await get_pool()
+        async with pool.acquire() as conn:
+            await conn.execute("""
+                UPDATE matches_live
+                SET media_analysis = $1, media_analysis_generated_at = NOW()
+                WHERE id = $2
+            """, json.dumps(media_analysis, ensure_ascii=False), match_id)
+
+        print(f"Media analysis generated for match {match_id}")
+
+    except Exception as e:
+        print(f"Media analysis generation error for match {match_id}: {e}")
+
+
 @app.get("/api/match/{match_id}")
 async def match_detail(match_id: int):
     """比赛详情：预测 + 历史交锋 + 近期战绩 + 模型特征"""
@@ -853,7 +1175,7 @@ async def match_detail(match_id: int):
                    odds_asian_home, odds_asian_handicap, odds_asian_away,
                    odds_ou_line, odds_ou_over, odds_ou_under,
                    source, result
-            FROM matches WHERE id = $1
+            FROM matches_live WHERE id = $1
         """, match_id)
         if not row:
             return {"error": "not found"}
@@ -866,36 +1188,46 @@ async def match_detail(match_id: int):
         home = m['home_team']
         away = m['away_team']
         match_dt = datetime.fromisoformat(m['date'])
+        # matches_history 存英文名（fdco）或中文名（zqcf），先尝试别名映射
+        home_en = team_aliases_cache.get(home, home)
+        away_en = team_aliases_cache.get(away, away)
         h2h_rows = await conn.fetch("""
             SELECT date, home_team, away_team, home_goals, away_goals
-            FROM matches
-            WHERE ((home_team = $1 AND away_team = $2) OR (home_team = $2 AND away_team = $1))
+            FROM matches_history
+            WHERE ((home_team = ANY($1) AND away_team = ANY($2)) OR (home_team = ANY($2) AND away_team = ANY($1)))
               AND home_goals IS NOT NULL AND date < $3
             ORDER BY date DESC LIMIT 10
-        """, home, away, match_dt)
+        """, [home, home_en], [away, away_en], match_dt)
         h2h_list = [dict(r) for r in h2h_rows]
+
+        # 先计算统计数据（使用英文名）
+        hw = sum(1 for r in h2h_list if
+                 (r['home_team'] == home and r['home_goals'] > r['away_goals']) or
+                 (r['away_team'] == home and r['away_goals'] > r['home_goals']))
+        dr = sum(1 for r in h2h_list if r['home_goals'] == r['away_goals'])
+        aw = sum(1 for r in h2h_list if
+                 (r['home_team'] == away and r['home_goals'] > r['away_goals']) or
+                 (r['away_team'] == away and r['away_goals'] > r['home_goals']))
+
+        # 再转换成中文名（用于显示）
         for r in h2h_list:
             r['date'] = r['date'].isoformat()
             r['home_team'] = to_chinese_name(r['home_team'])
             r['away_team'] = to_chinese_name(r['away_team'])
-
-        hw = sum(1 for r in h2h_list if r['home_team'] == home and r['home_goals'] > r['away_goals'])
-        dr = sum(1 for r in h2h_list if r['home_goals'] == r['away_goals'])
-        aw = sum(1 for r in h2h_list if r['home_team'] == away and r['home_goals'] > r['away_goals'])
         avg_goals = sum(r['home_goals'] + r['away_goals'] for r in h2h_list) / len(h2h_list) if h2h_list else 0
 
         # 近期战绩
-        async def recent_form(team: str, n=5):
+        async def recent_form(team: str, team_en: str, n=5):
             rows = await conn.fetch("""
                 SELECT date, home_team, away_team, home_goals, away_goals
-                FROM matches
-                WHERE (home_team = $1 OR away_team = $1)
+                FROM matches_history
+                WHERE (home_team = ANY($1) OR away_team = ANY($1))
                   AND home_goals IS NOT NULL AND date < $2
                 ORDER BY date DESC LIMIT $3
-            """, team, match_dt, n)
+            """, list({team, team_en}), match_dt, n)
             results = []
             for r in rows:
-                is_home = r['home_team'] == team
+                is_home = r['home_team'] in (team, team_en)
                 tg = r['home_goals'] if is_home else r['away_goals']
                 og = r['away_goals'] if is_home else r['home_goals']
                 opp = r['away_team'] if is_home else r['home_team']
@@ -909,13 +1241,18 @@ async def match_detail(match_id: int):
                 })
             return results
 
-        home_form = await recent_form(home)
-        away_form = await recent_form(away)
+        home_form = await recent_form(home, home_en)
+        away_form = await recent_form(away, away_en)
 
         # 模型预测
         hist = await fetch_historical_matches(limit=500)
         features = build_features(m, hist)
         pred = predict_proba(features, m)
+
+        # 比分预测
+        pred_score_home, pred_score_away, exp_home, exp_away = predict_score_from_models(
+            poisson_home_model, poisson_away_model, features, feature_names
+        )
 
         implied_home = implied_draw = implied_away = 1/3
         if m['odds_home'] and m['odds_draw'] and m['odds_away']:
@@ -937,6 +1274,21 @@ async def match_detail(match_id: int):
         home_pi = pi_ratings_cache.get(home, {'attack': 1000, 'defense': 1000})
         away_pi = pi_ratings_cache.get(away, {'attack': 1000, 'defense': 1000})
 
+        # 获取 AI 预测说明（如果已存在）
+        ai_explanation = await conn.fetchval(
+            "SELECT ai_explanation FROM matches_live WHERE id = $1",
+            match_id
+        )
+
+        # 获取媒体分析（如果已存在）
+        media_analysis_raw = await conn.fetchval(
+            "SELECT media_analysis FROM matches_live WHERE id = $1",
+            match_id
+        )
+        media_analysis = json.loads(media_analysis_raw) if media_analysis_raw else None
+
+        # AI 分析由定时任务生成，用户端只查询数据库
+
         return {
             "match": m,
             "prediction": {
@@ -949,8 +1301,14 @@ async def match_detail(match_id: int):
                 "value_home": round(pred['home'] - implied_home, 4),
                 "value_draw": round(pred['draw'] - implied_draw, 4),
                 "value_away": round(pred['away'] - implied_away, 4),
+                "pred_score_home": pred_score_home,
+                "pred_score_away": pred_score_away,
+                "expected_goals_home": round(exp_home, 2),
+                "expected_goals_away": round(exp_away, 2),
                 "model_name": "catboost_v1" if catboost_model else "pi_baseline",
+                "ai_explanation": ai_explanation,
             },
+            "media_analysis": media_analysis,
             "features": {
                 "pi_attack_home": safe_pi(home_pi['attack']),
                 "pi_defense_home": safe_pi(home_pi['defense']),
@@ -980,10 +1338,137 @@ async def match_detail(match_id: int):
 
 # ============ 用户认证 API ============
 
-@app.get("/api/matches", response_model=PredictResponse)
-async def get_matches():
-    """获取比赛列表（别名接口，调用 predict_today）"""
-    return await predict_today()
+@app.get("/api/matches")
+async def get_matches(hours: Optional[int] = Query(None, description="时间范围（小时），不传则返回所有")):
+    """
+    获取比赛列表（纯读 DB，由 scheduler 预计算并持久化预测结果）
+    """
+    pool = await get_pool()
+    now = datetime.utcnow()
+
+    # 时间过滤
+    if hours is not None:
+        cutoff = now + timedelta(hours=hours)
+        date_filter = "AND m.date <= $2"
+        params = (now, cutoff)
+    else:
+        # 默认返回当前时间往后 3 天
+        cutoff = now + timedelta(days=3)
+        date_filter = "AND m.date <= $2"
+        params = (now, cutoff)
+
+    query = f"""
+        SELECT
+            m.id,
+            m.date,
+            m.league,
+            m.home_team,
+            m.away_team,
+            m.home_goals,
+            m.away_goals,
+            m.status,
+            m.odds_home,
+            m.odds_draw,
+            m.odds_away,
+            m.ai_explanation,
+            pr.pred_home,
+            pr.pred_draw,
+            pr.pred_away,
+            pr.pred_score_home,
+            pr.pred_score_away,
+            pr.expected_goals_home,
+            pr.expected_goals_away,
+            pr.model_name,
+            pr.predicted_at
+        FROM matches_live m
+        LEFT JOIN LATERAL (
+            SELECT * FROM prediction_records
+            WHERE match_live_id = m.id AND evaluated_at IS NULL
+            ORDER BY predicted_at DESC
+            LIMIT 1
+        ) pr ON true
+        WHERE m.date >= $1
+          {date_filter}
+          AND m.odds_home IS NOT NULL
+        ORDER BY m.date
+    """
+
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(query, *params)
+
+    matches = []
+    for r in rows:
+        row = dict(r)
+        odds_home = row.get('odds_home') or 0
+        odds_draw = row.get('odds_draw') or 0
+        odds_away = row.get('odds_away') or 0
+
+        # 计算市场隐含概率
+        try:
+            total_impl = (1/odds_home + 1/odds_draw + 1/odds_away) if all([odds_home, odds_draw, odds_away]) else 1
+            implied_home = (1/odds_home / total_impl) if odds_home else 0
+            implied_draw = (1/odds_draw / total_impl) if odds_draw else 0
+            implied_away = (1/odds_away / total_impl) if odds_away else 0
+        except (ZeroDivisionError, TypeError):
+            implied_home = implied_draw = implied_away = 0
+
+        pred_home = row.get('pred_home') or 0
+        pred_draw = row.get('pred_draw') or 0
+        pred_away = row.get('pred_away') or 0
+
+        value_home = pred_home - implied_home
+        value_draw = pred_draw - implied_draw
+        value_away = pred_away - implied_away
+        has_value = value_home > 0.03 or value_draw > 0.03 or value_away > 0.03
+
+        # 状态推断（比赛已开始但未更新）
+        match_date = row['date']
+        if row.get('status') in ('pending', 'scheduled') and isinstance(match_date, datetime):
+            if match_date < now:
+                elapsed = (now - match_date).total_seconds()
+                if elapsed > 7200:
+                    status = 'finished'
+                else:
+                    status = 'live'
+            else:
+                status = 'pending'
+        else:
+            status = row.get('status', 'pending')
+
+        matches.append({
+            'id': row['id'],
+            'date': row['date'].isoformat() if hasattr(row['date'], 'isoformat') else str(row['date']),
+            'league': row.get('league') or '',
+            'league_cn': row.get('league') or '',
+            'home_team': row.get('home_team') or '',
+            'away_team': row.get('away_team') or '',
+            'home_team_cn': row.get('home_team') or '',
+            'away_team_cn': row.get('away_team') or '',
+            'home_goals': row.get('home_goals'),
+            'away_goals': row.get('away_goals'),
+            'status': status,
+            'odds_home': odds_home,
+            'odds_draw': odds_draw,
+            'odds_away': odds_away,
+            'implied_home': round(implied_home, 4),
+            'implied_draw': round(implied_draw, 4),
+            'implied_away': round(implied_away, 4),
+            'pred_home': round(pred_home, 4) if pred_home else None,
+            'pred_draw': round(pred_draw, 4) if pred_draw else None,
+            'pred_away': round(pred_away, 4) if pred_away else None,
+            'value_home': round(value_home, 4),
+            'value_draw': round(value_draw, 4),
+            'value_away': round(value_away, 4),
+            'has_value': has_value,
+            'pred_score_home': row.get('pred_score_home'),
+            'pred_score_away': row.get('pred_score_away'),
+            'expected_goals_home': round(row['expected_goals_home'], 2) if row.get('expected_goals_home') is not None else None,
+            'expected_goals_away': round(row['expected_goals_away'], 2) if row.get('expected_goals_away') is not None else None,
+            'ai_explanation': row.get('ai_explanation'),
+            'model_name': row.get('model_name') or '',
+        })
+
+    return {'matches': matches, 'fetched_at': now.isoformat(), 'source': 'db'}
 
 
 @app.post("/api/auth/register", response_model=AuthResponse)
@@ -1299,7 +1784,7 @@ async def get_recent_predictions(limit: int = Query(10, ge=1, le=50)):
                 pr.is_correct,
                 pr.rps_score
             FROM prediction_records pr
-            JOIN matches m ON pr.match_id = m.id
+            JOIN matches_live m ON pr.match_live_id = m.id
             WHERE pr.evaluated_at IS NOT NULL
             ORDER BY pr.evaluated_at DESC
             LIMIT $1
@@ -1337,9 +1822,9 @@ async def evaluate_completed_matches():
         # 获取所有已完成但未评估的比赛
         matches = await conn.fetch(
             """
-            SELECT DISTINCT pr.match_id
+            SELECT DISTINCT pr.match_live_id
             FROM prediction_records pr
-            JOIN matches m ON pr.match_id = m.id
+            JOIN matches_live m ON pr.match_live_id = m.id
             WHERE pr.evaluated_at IS NULL
             AND m.home_goals IS NOT NULL
             AND m.away_goals IS NOT NULL
@@ -1350,11 +1835,238 @@ async def evaluate_completed_matches():
         for match in matches:
             await conn.execute(
                 "SELECT evaluate_prediction($1)",
-                match['match_id']
+                match['match_live_id']
             )
             evaluated_count += 1
 
         return {"evaluated": evaluated_count, "message": f"已评估 {evaluated_count} 场比赛"}
+
+
+# ============ 历史预测增强 API ============
+
+@app.get("/api/stats/data-quality")
+async def get_data_quality():
+    """数据质量监控"""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        stats = await conn.fetchrow("SELECT * FROM data_quality_stats")
+
+        # 获取缺失赛果的比赛列表
+        missing_results = await conn.fetch("""
+            SELECT id, date, league, home_team, away_team
+            FROM matches_live
+            WHERE status = 'pending'
+            AND date < NOW() - INTERVAL '24 hours'
+            ORDER BY date DESC
+            LIMIT 10
+        """)
+
+        return {
+            "last_result_update": stats['last_result_update'].isoformat() if stats['last_result_update'] else None,
+            "missing_results_count": stats['missing_results_count'],
+            "pending_evaluations": stats['pending_evaluations'],
+            "recent_evaluations": stats['recent_evaluations'],
+            "finished_without_score": stats['finished_without_score'],
+            "evaluated_without_actual": stats['evaluated_without_actual'],
+            "missing_results": [
+                {
+                    "id": m['id'],
+                    "date": m['date'].isoformat(),
+                    "league": m['league'],
+                    "home_team": m['home_team'],
+                    "away_team": m['away_team']
+                }
+                for m in missing_results
+            ]
+        }
+
+
+@app.post("/api/admin/batch-evaluate")
+async def batch_evaluate_predictions(limit: int = 100):
+    """批量评估预测（管理员接口）"""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        result = await conn.fetchrow(
+            "SELECT * FROM batch_evaluate_predictions($1)",
+            limit
+        )
+
+        return {
+            "evaluated_count": result['evaluated_count'],
+            "failed_count": result['failed_count'],
+            "message": f"成功评估 {result['evaluated_count']} 场，失败 {result['failed_count']} 场"
+        }
+
+
+@app.get("/api/stats/accuracy-trend")
+async def get_accuracy_trend(days: int = 30):
+    """准确率趋势数据"""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        trend = await conn.fetch("""
+            SELECT
+                DATE(predicted_at) as date,
+                COUNT(*) as total,
+                COUNT(*) FILTER (WHERE is_correct = true) as correct,
+                ROUND((COUNT(*) FILTER (WHERE is_correct = true)::NUMERIC / NULLIF(COUNT(*), 0) * 100)::NUMERIC, 2) as accuracy,
+                ROUND(AVG(rps_score)::NUMERIC, 4) as avg_rps
+            FROM prediction_records
+            WHERE evaluated_at IS NOT NULL
+            AND predicted_at >= NOW() - INTERVAL '%s days'
+            GROUP BY DATE(predicted_at)
+            ORDER BY date DESC
+        """ % days)
+
+        return {
+            "trend": [
+                {
+                    "date": row['date'].isoformat(),
+                    "total": row['total'],
+                    "correct": row['correct'],
+                    "accuracy": float(row['accuracy']) if row['accuracy'] else 0,
+                    "avg_rps": float(row['avg_rps']) if row['avg_rps'] else 0
+                }
+                for row in trend
+            ]
+        }
+
+
+@app.get("/api/stats/accuracy-by-league")
+async def get_accuracy_by_league():
+    """按联赛统计准确率"""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        leagues = await conn.fetch("SELECT * FROM prediction_accuracy_by_league")
+
+        return {
+            "leagues": [
+                {
+                    "league": row['league'],
+                    "total_predictions": row['total_predictions'],
+                    "correct_predictions": row['correct_predictions'],
+                    "accuracy_percentage": float(row['accuracy_percentage']) if row['accuracy_percentage'] else 0,
+                    "avg_rps": float(row['avg_rps']) if row['avg_rps'] else 0,
+                    "exact_score_matches": row['exact_score_matches']
+                }
+                for row in leagues
+            ]
+        }
+
+
+@app.get("/api/stats/predictions")
+async def get_predictions_list(
+    page: int = 1,
+    limit: int = 20,
+    status: str = "all",  # all, correct, incorrect, pending
+    league: str = "all",
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None
+):
+    """预测记录列表（分页、筛选）"""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        # 构建查询条件
+        conditions = []
+        params = []
+        param_count = 0
+
+        if status == "correct":
+            conditions.append("pr.is_correct = true AND pr.evaluated_at IS NOT NULL")
+        elif status == "incorrect":
+            conditions.append("pr.is_correct = false AND pr.evaluated_at IS NOT NULL")
+        elif status == "pending":
+            conditions.append("pr.evaluated_at IS NULL AND m.date < NOW()")
+        elif status == "evaluated":
+            conditions.append("pr.evaluated_at IS NOT NULL")
+
+        if league != "all":
+            param_count += 1
+            conditions.append(f"m.league = ${param_count}")
+            params.append(league)
+
+        if date_from:
+            param_count += 1
+            conditions.append(f"DATE(pr.predicted_at) >= ${param_count}")
+            params.append(date_from)
+
+        if date_to:
+            param_count += 1
+            conditions.append(f"DATE(pr.predicted_at) <= ${param_count}")
+            params.append(date_to)
+
+        where_clause = " AND ".join(conditions) if conditions else "1=1"
+
+        # 查询总数
+        count_query = f"""
+            SELECT COUNT(*)
+            FROM prediction_records pr
+            JOIN matches_live m ON pr.match_live_id = m.id
+            WHERE {where_clause}
+        """
+        total = await conn.fetchval(count_query, *params)
+
+        # 查询数据
+        offset = (page - 1) * limit
+        param_count += 1
+        limit_param = f"${param_count}"
+        param_count += 1
+        offset_param = f"${param_count}"
+        params.extend([limit, offset])
+
+        data_query = f"""
+            SELECT
+                pr.*,
+                m.date as match_date,
+                m.league,
+                m.home_team,
+                m.away_team,
+                m.odds_home,
+                m.odds_draw,
+                m.odds_away
+            FROM prediction_records pr
+            JOIN matches_live m ON pr.match_live_id = m.id
+            WHERE {where_clause}
+            ORDER BY pr.predicted_at DESC
+            LIMIT {limit_param} OFFSET {offset_param}
+        """
+
+        records = await conn.fetch(data_query, *params)
+
+        return {
+            "total": total,
+            "page": page,
+            "limit": limit,
+            "total_pages": (total + limit - 1) // limit,
+            "predictions": [
+                {
+                    "id": row['id'],
+                    "match_id": row['match_id'],
+                    "match_date": row['match_date'].isoformat(),
+                    "league": row['league'],
+                    "league_cn": row['league'],
+                    "home_team": row['home_team'],
+                    "away_team": row['away_team'],
+                    "home_team_cn": row['home_team'],
+                    "away_team_cn": row['away_team'],
+                    "pred_home": float(row['pred_home']),
+                    "pred_draw": float(row['pred_draw']),
+                    "pred_away": float(row['pred_away']),
+                    "pred_score_home": row['pred_score_home'],
+                    "pred_score_away": row['pred_score_away'],
+                    "actual_home": row['actual_home'],
+                    "actual_away": row['actual_away'],
+                    "is_correct": row['is_correct'],
+                    "score_exact_match": row['score_exact_match'],
+                    "rps_score": float(row['rps_score']) if row['rps_score'] else None,
+                    "odds_home": float(row['odds_home']) if row['odds_home'] else None,
+                    "odds_draw": float(row['odds_draw']) if row['odds_draw'] else None,
+                    "odds_away": float(row['odds_away']) if row['odds_away'] else None,
+                    "predicted_at": row['predicted_at'].isoformat() if row['predicted_at'] else None,
+                    "evaluated_at": row['evaluated_at'].isoformat() if row['evaluated_at'] else None
+                }
+                for row in records
+            ]
+        }
 
 
 # ============ AI 聊天 API ============
@@ -1383,7 +2095,7 @@ async def get_match_context(match_id: int) -> Dict[str, Any]:
                     WHERE team_name = m.away_team
                     ORDER BY date DESC LIMIT 5
                 ) sub) as away_form
-            FROM matches m
+            FROM matches_live m
             WHERE m.id = $1
             """,
             match_id
@@ -1493,7 +2205,17 @@ async def chat_with_ai(request: ChatRequest, token: str = Header(None)):
 
 @app.on_event("startup")
 async def startup():
-    await get_pool()
+    global team_aliases_cache
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT alias, canonical_name FROM team_aliases WHERE canonical_name IS NOT NULL AND active = true"
+        )
+        team_aliases_cache = {r['alias']: r['canonical_name'] for r in rows}
+        # 合并内存字典（DB 优先）
+        merged = {**CHINESE_TO_ENGLISH, **team_aliases_cache}
+        team_aliases_cache = merged
+    print(f"Loaded {len(team_aliases_cache)} team aliases")
 
 
 @app.on_event("shutdown")
@@ -1503,4 +2225,5 @@ async def shutdown():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
+    # reload=False 可以加快启动速度，但修改代码后需要手动重启
+    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=False)

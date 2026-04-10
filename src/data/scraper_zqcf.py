@@ -115,31 +115,30 @@ async def upsert_match(conn, m: dict, league_code: str, season_name: str) -> boo
         result = 'away_win'
 
     await conn.execute('''
-        INSERT INTO matches (
+        INSERT INTO matches_history (
             date, league, home_team, away_team,
             home_goals, away_goals,
             odds_home, odds_draw, odds_away,
             odds_asian_home, odds_asian_handicap, odds_asian_away,
             odds_ou_line, odds_ou_over, odds_ou_under,
-            source, source_match_id, zqcf_match_id,
-            status, result
+            source, source_match_id, result
         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,
-                  'zqcf',$16,$16,'finished',$17)
-        ON CONFLICT (source, source_match_id) DO UPDATE SET
-            home_goals        = EXCLUDED.home_goals,
-            away_goals        = EXCLUDED.away_goals,
-            odds_home         = COALESCE(EXCLUDED.odds_home, matches.odds_home),
-            odds_draw         = COALESCE(EXCLUDED.odds_draw, matches.odds_draw),
-            odds_away         = COALESCE(EXCLUDED.odds_away, matches.odds_away),
-            odds_asian_home   = COALESCE(EXCLUDED.odds_asian_home, matches.odds_asian_home),
-            odds_asian_handicap = COALESCE(EXCLUDED.odds_asian_handicap, matches.odds_asian_handicap),
-            odds_asian_away   = COALESCE(EXCLUDED.odds_asian_away, matches.odds_asian_away),
-            odds_ou_line      = COALESCE(EXCLUDED.odds_ou_line, matches.odds_ou_line),
-            odds_ou_over      = COALESCE(EXCLUDED.odds_ou_over, matches.odds_ou_over),
-            odds_ou_under     = COALESCE(EXCLUDED.odds_ou_under, matches.odds_ou_under),
-            status            = 'finished',
-            result            = EXCLUDED.result,
-            updated_at        = NOW()
+                  'zqcf',$16,$17)
+        ON CONFLICT (home_team, away_team, date) DO UPDATE SET
+            home_goals          = EXCLUDED.home_goals,
+            away_goals          = EXCLUDED.away_goals,
+            odds_home           = COALESCE(EXCLUDED.odds_home, matches_history.odds_home),
+            odds_draw           = COALESCE(EXCLUDED.odds_draw, matches_history.odds_draw),
+            odds_away           = COALESCE(EXCLUDED.odds_away, matches_history.odds_away),
+            odds_asian_home     = COALESCE(EXCLUDED.odds_asian_home, matches_history.odds_asian_home),
+            odds_asian_handicap = COALESCE(EXCLUDED.odds_asian_handicap, matches_history.odds_asian_handicap),
+            odds_asian_away     = COALESCE(EXCLUDED.odds_asian_away, matches_history.odds_asian_away),
+            odds_ou_line        = COALESCE(EXCLUDED.odds_ou_line, matches_history.odds_ou_line),
+            odds_ou_over        = COALESCE(EXCLUDED.odds_ou_over, matches_history.odds_ou_over),
+            odds_ou_under       = COALESCE(EXCLUDED.odds_ou_under, matches_history.odds_ou_under),
+            source_match_id     = COALESCE(EXCLUDED.source_match_id, matches_history.source_match_id),
+            result              = EXCLUDED.result,
+            updated_at          = NOW()
     ''',
         match_dt, league_code, m.get('homeTeam', ''), m.get('guestTeam', ''),
         int(home_score), int(guest_score),
@@ -195,7 +194,7 @@ async def main():
 
     # Final count
     conn = await asyncpg.connect(DATABASE_URL)
-    total_db = await conn.fetchval("SELECT COUNT(*) FROM matches WHERE source='zqcf'")
+    total_db = await conn.fetchval("SELECT COUNT(*) FROM matches_history WHERE source='zqcf'")
     await conn.close()
     log.info(f'Done. Inserted {grand_total} matches. DB total zqcf: {total_db}')
 
