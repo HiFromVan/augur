@@ -421,6 +421,16 @@ async def task_update_live_scores():
                     print(f"  {date_str} 比分获取失败: {e}")
                     continue
 
+        # 比分更新后立即触发评估
+        try:
+            p = await get_pool()
+            async with p.acquire() as conn:
+                result = await conn.fetchrow("SELECT * FROM batch_evaluate_predictions(500)")
+                if result and result[0] > 0:
+                    print(f"  自动评估：{result[0]} 条预测已更新")
+        except Exception as e:
+            print(f"  自动评估失败: {e}")
+
         duration = (datetime.now() - started).total_seconds()
         print(f"  实时比分更新完成，耗时 {duration:.1f}s")
         await _log_run('live_scores', started, 'success', 0)
