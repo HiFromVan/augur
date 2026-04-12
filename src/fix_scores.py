@@ -45,40 +45,32 @@ async def main():
     """)
     print(f"Total matches_live: {len(db_matches)}")
 
-    # 从 500.com 列表页爬 fid，覆盖最近 14 天
+    # 从 trade.500.com 赔率页爬 fid，覆盖最近 14 天
+    # 用赔率页而非 live 页，因为球队名与数据库一致（都来自 data-homesxname/data-awaysxname）
     today = date.today()
-    # key: (home, away, match_date) -> fid
+    # key: (home, away) -> fid
     fid_map = {}
 
     async with httpx.AsyncClient(timeout=20.0) as client:
         for i in range(14):
             d = today - timedelta(days=i)
             date_str = d.strftime('%Y-%m-%d')
-            url = f"https://live.500.com/?e={date_str}"
+            url = f"https://trade.500.com/jczq/?playid=312&g=2&date={date_str}"
             try:
-                resp = await client.get(url, headers={'User-Agent': 'Mozilla/5.0'})
-                resp.encoding = 'gb2312'
+                resp = await client.get(url, headers={
+                    'User-Agent': 'Mozilla/5.0',
+                    'Referer': 'https://trade.500.com/',
+                })
                 soup = BeautifulSoup(resp.text, 'html.parser')
-                rows = soup.find_all('tr', id=re.compile(r'^a\d+'))
+                rows = soup.find_all('tr', class_='bet-tb-tr')
                 cnt = 0
                 for row in rows:
-                    fid = row.get('fid', '')
-                    gy = row.get('gy', '')
-                    parts = gy.split(',')
-                    if len(parts) < 3 or not fid:
+                    fid = row.get('data-fixtureid', '')
+                    home = row.get('data-homesxname', '')
+                    away = row.get('data-awaysxname', '')
+                    if not fid or not home or not away:
                         continue
-                    home = parts[1].strip()
-                    away = parts[2].strip()
-                    match_date_key = None
-                    for td in row.find_all('td'):
-                        td_text = td.get_text(strip=True)
-                        dm = re.match(r'^(\d{2}-\d{2})\s+\d{2}:\d{2}$', td_text)
-                        if dm:
-                            match_date_key = date(d.year, int(dm.group(1).split('-')[0]), int(dm.group(1).split('-')[1]))
-                            break
-                    if match_date_key is None:
-                        match_date_key = d
-                    fid_map[(home, away, match_date_key)] = fid
+                    fid_map[(home, away)] = fid
                     cnt += 1
                 print(f"  {date_str}: {cnt} matches")
             except Exception as e:
@@ -89,7 +81,7 @@ async def main():
         # 匹配并更新 source_match_id
         fid_updated = 0
         for row in db_matches:
-            key = (row['home_team'], row['away_team'], row['match_date'])
+            key = (row['home_team'], row['away_team'])
             fid = fid_map.get(key)
             if fid and row['source_match_id'] != fid:
                 await conn.execute(
@@ -117,7 +109,7 @@ async def main():
             to_fix.append((row['id'], row['home_team'], row['away_team'],
                           row['home_goals'], row['away_goals'], row['source_match_id']))
         for row in finished_old:
-            key = (row['home_team'], row['away_team'], row['match_date'])
+            key = (row['home_team'], row['away_team'])
             fid = fid_map.get(key)
             if fid:
                 to_fix.append((row['id'], row['home_team'], row['away_team'],
