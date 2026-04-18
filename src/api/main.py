@@ -680,6 +680,30 @@ def load_assets():
     return catboost_model
 
 
+def _smart_blend(pred: dict, features: dict, mw: float = 0.55, db: float = 1.20) -> dict:
+    """模型预测与赔率隐含概率混合，动态权重基于 Pi-Ratings 数据量"""
+    ih = features.get('implied_home', 0)
+    id_ = features.get('implied_draw', 0)
+    ia = features.get('implied_away', 0)
+    if ih + id_ + ia < 0.5:
+        return pred
+    pi_sum = abs(features.get('pi_attack_home', 0)) + abs(features.get('pi_defense_home', 0)) + \
+             abs(features.get('pi_attack_away', 0)) + abs(features.get('pi_defense_away', 0))
+    if pi_sum < 0.5:
+        model_weight = 0.0
+    elif pi_sum < 2.0:
+        model_weight = 0.3
+    else:
+        model_weight = mw
+    w = 1 - model_weight
+    ph = pred['home'] * model_weight + ih * w
+    pd = pred['draw'] * model_weight + id_ * w
+    pa = pred['away'] * model_weight + ia * w
+    pd *= db
+    t = ph + pd + pa
+    return {'home': ph / t, 'draw': pd / t, 'away': pa / t}
+
+
 def predict_proba(features: dict, match: dict) -> dict:
     """用 CatBoost 模型预测概率"""
     model = load_assets()
@@ -690,7 +714,8 @@ def predict_proba(features: dict, match: dict) -> dict:
     try:
         feature_vector = [features.get(k, 0.0) for k in feature_names]
         probs = model.predict_proba([feature_vector])[0]
-        return {'home': float(probs[0]), 'draw': float(probs[1]), 'away': float(probs[2])}
+        pred = {'home': float(probs[0]), 'draw': float(probs[1]), 'away': float(probs[2])}
+        return _smart_blend(pred, features)
     except Exception as e:
         print(f"Model prediction failed: {e}")
         return _baseline_predict(features)

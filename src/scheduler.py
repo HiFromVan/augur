@@ -695,6 +695,30 @@ def _s_build_features(match, team_idx, h2h_idx, pi_ratings):
     }
 
 
+def _s_smart_blend(pred: dict, features: dict, mw: float = 0.55, db: float = 1.20) -> dict:
+    """模型预测与赔率隐含概率混合，动态权重基于 Pi-Ratings 数据量"""
+    ih = features.get('implied_home', 0)
+    id_ = features.get('implied_draw', 0)
+    ia = features.get('implied_away', 0)
+    if ih + id_ + ia < 0.5:
+        return pred
+    pi_sum = abs(features.get('pi_attack_home', 0)) + abs(features.get('pi_defense_home', 0)) + \
+             abs(features.get('pi_attack_away', 0)) + abs(features.get('pi_defense_away', 0))
+    if pi_sum < 0.5:
+        model_weight = 0.0
+    elif pi_sum < 2.0:
+        model_weight = 0.3
+    else:
+        model_weight = mw
+    w = 1 - model_weight
+    ph = pred['home'] * model_weight + ih * w
+    pd = pred['draw'] * model_weight + id_ * w
+    pa = pred['away'] * model_weight + ia * w
+    pd *= db
+    t = ph + pd + pa
+    return {'home': ph / t, 'draw': pd / t, 'away': pa / t}
+
+
 def _s_predict_proba(features, feature_names):
     """纯 Python 预测"""
     # 如果 pi_ratings 全是 0（队名未匹配），直接用赔率隐含概率
@@ -711,7 +735,8 @@ def _s_predict_proba(features, feature_names):
         try:
             ordered = [features.get(fn, 'unknown') if fn == 'league' else features.get(fn, 0.0) for fn in feature_names]
             probs = _s_model.predict_proba([ordered])[0]
-            return {'home': float(probs[0]), 'draw': float(probs[1]), 'away': float(probs[2])}
+            pred = {'home': float(probs[0]), 'draw': float(probs[1]), 'away': float(probs[2])}
+            return _s_smart_blend(pred, features)
         except Exception:
             pass
     # fallback
