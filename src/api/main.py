@@ -41,6 +41,7 @@ HOME_GOALS_MODEL_PATH = str(MODEL_DIR / "home_goals_v1.cbm")
 AWAY_GOALS_MODEL_PATH = str(MODEL_DIR / "away_goals_v1.cbm")
 FEATURES_PATH = str(MODEL_DIR / "features_v1.json")
 PI_RATINGS_PATH = str(MODEL_DIR / "pi_ratings_v1.json")
+LEAGUE_STATS_PATH = str(MODEL_DIR / "league_stats_v1.json")
 
 # Anthropic API
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
@@ -339,6 +340,20 @@ def build_features(match: dict, all_matches: List[dict]) -> dict:
     aw, a_s, a_c, ap = _recent_form(away, all_matches, match_dt)
     h2h_rate, h2h_draw, h2h_goals = _h2h(home, away, all_matches, match_dt)
 
+    # 客队近5场客场平局率
+    away_matches_recent = [
+        m for m in all_matches
+        if m['away_team'] == away and m['home_goals'] is not None and m['date'] < match_dt
+    ]
+    away_matches_recent.sort(key=lambda x: x['date'], reverse=True)
+    away_away = away_matches_recent[:5]
+    away_draw_rate = (sum(1 for m in away_away if m['home_goals'] == m['away_goals']) / len(away_away)) if away_away else 0.25
+
+    # 联赛平局率（从 league_stats_cache 读取）
+    league_name = match.get('league', '')
+    ls = league_stats_cache.get(league_name) or league_stats_cache.get('__global__') or {}
+    league_draw_rate = ls.get('draw_rate', 0.25)
+
     return {
         'pi_attack_home': hr['attack'],
         'pi_defense_home': hr['defense'],
@@ -358,6 +373,8 @@ def build_features(match: dict, all_matches: List[dict]) -> dict:
         'h2h_win_rate': h2h_rate,
         'h2h_draw_rate': h2h_draw,
         'h2h_avg_goals': h2h_goals,
+        'league_draw_rate': league_draw_rate,
+        'away_draw_rate_5': away_draw_rate,
     }
 
 
@@ -602,12 +619,13 @@ poisson_home_model = None
 poisson_away_model = None
 feature_names: list = []
 pi_ratings_cache: dict = {}
+league_stats_cache: dict = {}
 team_aliases_cache: dict = {}  # alias → canonical_name，启动时从 DB 加载
 
 
 def load_assets():
     """加载模型 + 特征名 + Pi-Ratings（全局缓存）"""
-    global catboost_model, poisson_home_model, poisson_away_model, feature_names, pi_ratings_cache
+    global catboost_model, poisson_home_model, poisson_away_model, feature_names, pi_ratings_cache, league_stats_cache
 
     # 加载 Pi-Ratings（训练时保存的）
     if not pi_ratings_cache and os.path.exists(PI_RATINGS_PATH):
@@ -615,6 +633,13 @@ def load_assets():
         with open(PI_RATINGS_PATH) as f:
             pi_ratings_cache = json.load(f)
         print(f"Loaded Pi-Ratings for {len(pi_ratings_cache)} teams")
+
+    # 加载联赛统计（含平局率）
+    if not league_stats_cache and os.path.exists(LEAGUE_STATS_PATH):
+        import json
+        with open(LEAGUE_STATS_PATH) as f:
+            league_stats_cache = json.load(f)
+        print(f"Loaded league stats for {len(league_stats_cache)} leagues")
 
     # 加载特征名
     if not feature_names and os.path.exists(FEATURES_PATH):

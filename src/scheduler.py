@@ -587,7 +587,7 @@ def _s_build_indices(all_matches):
 
 
 def _s_recent_form(team, team_idx, match_date, n=5):
-    recent = [m for m in team_idx.get(team, []) if m['date'] < match_date][:n]
+    recent = [m for m in team_idx.get(team, []) if m['date'] < match_date][-n:]
     if not recent:
         return 0.33, 1.0, 1.0, 1.0
     wins = draws = gs = gc = 0
@@ -603,6 +603,16 @@ def _s_recent_form(team, team_idx, match_date, n=5):
             draws += 1
     t = len(recent)
     return wins / t, gs / t, gc / t, (wins * 3 + draws) / t
+
+
+def _s_away_draw_rate(team, team_idx, match_date, n=5) -> float:
+    """客队近n场客场平局率"""
+    all_recent = [m for m in team_idx.get(team, []) if m['date'] < match_date][-(n * 2):]
+    away_matches = [m for m in all_recent if m['away_team'] == team][-n:]
+    if not away_matches:
+        return 0.25
+    draws = sum(1 for m in away_matches if m['home_goals'] == m['away_goals'])
+    return draws / len(away_matches)
 
 
 def _s_h2h(home, away, h2h_idx, match_date, n=10):
@@ -631,6 +641,7 @@ def _s_build_features(match, team_idx, h2h_idx, pi_ratings):
     hw, hs, hc, hp = _s_recent_form(home, team_idx, match_dt)
     aw, a_s, a_c, ap = _s_recent_form(away, team_idx, match_dt)
     h2h_rate, h2h_draw, h2h_goals = _s_h2h(home, away, h2h_idx, match_dt)
+    away_draw_rate = _s_away_draw_rate(away, team_idx, match_dt)
 
     league_raw = match.get('league', 'unknown')
     league = _s_league_alias.get(league_raw, league_raw)
@@ -679,6 +690,8 @@ def _s_build_features(match, team_idx, h2h_idx, pi_ratings):
         'league_avg_home_goals': ls.get('avg_home', 1.36),
         'league_avg_away_goals': ls.get('avg_away', 1.18),
         'league_avg_total_goals': ls.get('avg_total', 2.54),
+        'league_draw_rate': ls.get('draw_rate', 0.25),
+        'away_draw_rate_5': away_draw_rate,
     }
 
 

@@ -79,7 +79,6 @@ def build_h2h_index(matches: list) -> dict:
 
 def _recent_form(team_name: str, match_date, team_index: dict, n=5):
     ms = team_index.get(team_name, [])
-    # Binary search for matches before match_date
     import bisect
     dates = [m['date'] for m in ms]
     idx = bisect.bisect_left(dates, match_date)
@@ -99,6 +98,19 @@ def _recent_form(team_name: str, match_date, team_index: dict, n=5):
             draws += 1
     total = len(recent)
     return wins / total, goals_s / total, goals_c / total, (wins * 3 + draws) / total
+
+
+def _away_draw_rate(team_name: str, match_date, team_index: dict, n=5) -> float:
+    """客队近n场客场平局率"""
+    ms = team_index.get(team_name, [])
+    import bisect
+    dates = [m['date'] for m in ms]
+    idx = bisect.bisect_left(dates, match_date)
+    away_matches = [m for m in ms[max(0, idx - n * 2):idx] if m['away_team'] == team_name][-n:]
+    if not away_matches:
+        return 0.25
+    draws = sum(1 for m in away_matches if m['home_goals'] == m['away_goals'])
+    return draws / len(away_matches)
 
 
 def _h2h(home_t: str, away_t: str, match_date, h2h_index: dict, n=10):
@@ -131,6 +143,7 @@ def build_features(match: dict, pi_ratings: dict,
     hw, hs, hc, hp = _recent_form(home, match_date, team_index)
     aw, a_s, a_c, ap = _recent_form(away, match_date, team_index)
     h2h_rate, h2h_draw, h2h_goals = _h2h(home, away, match_date, h2h_index)
+    away_draw_rate = _away_draw_rate(away, match_date, team_index)
 
     # 赔率隐含概率（去除水位后）
     implied_home = implied_draw = implied_away = 1/3
@@ -180,28 +193,41 @@ def build_features(match: dict, pi_ratings: dict,
         'league_avg_home_goals': (league_stats or {}).get(match.get('league', ''), {}).get('avg_home') or (league_stats or {}).get('__global__', {}).get('avg_home', 1.36),
         'league_avg_away_goals': (league_stats or {}).get(match.get('league', ''), {}).get('avg_away') or (league_stats or {}).get('__global__', {}).get('avg_away', 1.18),
         'league_avg_total_goals': (league_stats or {}).get(match.get('league', ''), {}).get('avg_total') or (league_stats or {}).get('__global__', {}).get('avg_total', 2.54),
+        'league_draw_rate': (league_stats or {}).get(match.get('league', ''), {}).get('draw_rate') or (league_stats or {}).get('__global__', {}).get('draw_rate', 0.25),
+        'away_draw_rate_5': away_draw_rate,
     }
 
 
 def build_league_stats(matches: list) -> dict:
-    """预计算每个联赛的历史平均进球数"""
+    """预计算每个联赛的历史平均进球数和平局率"""
     from collections import defaultdict
-    stats = defaultdict(lambda: {'home_goals': [], 'away_goals': []})
+    stats = defaultdict(lambda: {'home_goals': [], 'away_goals': [], 'draws': 0, 'total': 0})
     for m in matches:
         if m['home_goals'] is not None and m['away_goals'] is not None:
             league = m.get('league', 'unknown')
             stats[league]['home_goals'].append(m['home_goals'])
             stats[league]['away_goals'].append(m['away_goals'])
+            stats[league]['total'] += 1
+            if m['home_goals'] == m['away_goals']:
+                stats[league]['draws'] += 1
     result = {}
     global_home = np.mean([m['home_goals'] for m in matches if m['home_goals'] is not None])
     global_away = np.mean([m['away_goals'] for m in matches if m['away_goals'] is not None])
+    global_draws = sum(1 for m in matches if m['home_goals'] is not None and m['home_goals'] == m['away_goals'])
+    global_total = sum(1 for m in matches if m['home_goals'] is not None)
+    global_draw_rate = global_draws / global_total if global_total > 0 else 0.25
     for league, data in stats.items():
+        draw_rate = data['draws'] / data['total'] if data['total'] > 0 else global_draw_rate
         result[league] = {
             'avg_home': np.mean(data['home_goals']) if data['home_goals'] else global_home,
             'avg_away': np.mean(data['away_goals']) if data['away_goals'] else global_away,
             'avg_total': np.mean([h + a for h, a in zip(data['home_goals'], data['away_goals'])]),
+            'draw_rate': draw_rate,
         }
-    result['__global__'] = {'avg_home': global_home, 'avg_away': global_away, 'avg_total': global_home + global_away}
+    result['__global__'] = {
+        'avg_home': global_home, 'avg_away': global_away,
+        'avg_total': global_home + global_away, 'draw_rate': global_draw_rate,
+    }
     return result
 
 
