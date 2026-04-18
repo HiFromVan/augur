@@ -675,10 +675,27 @@ def _baseline_predict(features: dict) -> dict:
     """Pi-Ratings 基线预测（模型不可用时降级）"""
     pi_diff = features.get('pi_diff', 0.0) + 0.25
     raw_home = 1 / (1 + np.exp(-pi_diff))
-    draw = max(0.15, min(0.35, 0.25 - abs(pi_diff) * 0.05))
+    # 实际平局率约23%，提高基准值并降低衰减
+    draw = max(0.18, min(0.42, 0.28 - abs(pi_diff) * 0.03))
     raw_away = 1 - raw_home - draw
     total = raw_home + draw + raw_away
-    return {'home': raw_home / total, 'draw': draw / total, 'away': raw_away / total}
+    pi_home = raw_home / total
+    pi_draw = draw / total
+    pi_away = raw_away / total
+
+    # 如果有赔率，与市场隐含概率做加权混合（市场权重 40%）
+    implied_home = features.get('implied_home', 0.0)
+    implied_draw = features.get('implied_draw', 0.0)
+    implied_away = features.get('implied_away', 0.0)
+    if implied_home > 0 and implied_draw > 0 and implied_away > 0:
+        w = 0.4
+        pi_home = pi_home * (1 - w) + implied_home * w
+        pi_draw = pi_draw * (1 - w) + implied_draw * w
+        pi_away = pi_away * (1 - w) + implied_away * w
+        t = pi_home + pi_draw + pi_away
+        pi_home, pi_draw, pi_away = pi_home / t, pi_draw / t, pi_away / t
+
+    return {'home': pi_home, 'draw': pi_draw, 'away': pi_away}
 
 
 # ============ API 端点 ============

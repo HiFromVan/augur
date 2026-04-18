@@ -80,9 +80,9 @@ class CatBoostPredictor(BasePredictor):
         combined = pi_diff + home_adv
         home_win = 1 / (1 + np.exp(-combined))
 
-        # 平局概率固定 25% 左右，根据实力差调整
-        draw = 0.25 - abs(combined) * 0.05
-        draw = max(0.15, min(0.35, draw))
+        # 实际平局率约23%，提高基准值并降低衰减，让平局更容易成为最高概率
+        draw = 0.28 - abs(combined) * 0.03
+        draw = max(0.18, min(0.42, draw))
 
         away_win = 1 - home_win - draw
 

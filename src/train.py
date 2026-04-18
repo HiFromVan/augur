@@ -304,6 +304,8 @@ async def main():
     train_pool = Pool(X_train_arr, y_train_arr, cat_features=cat_features_cls)
     test_pool = Pool(X_test_arr, y_test_arr, cat_features=cat_features_cls)
 
+    # class_weights: 平局(1)在实际数据中占比~23%，主胜(0)~50%，客胜(2)~28%
+    # 用反比权重让模型更重视少数类（平局）
     model = CatBoostClassifier(
         iterations=1000,
         learning_rate=0.05,
@@ -313,6 +315,7 @@ async def main():
         early_stopping_rounds=50,
         verbose=100,
         task_type='CPU',
+        class_weights=[1.0, 2.2, 1.8],  # 0=主胜, 1=平局, 2=客胜
     )
 
     model.fit(train_pool, eval_set=test_pool)
