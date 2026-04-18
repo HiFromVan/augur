@@ -25,6 +25,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://augur:augur@localhost:5432/augur")
 FOOTBALL_DATA_API_KEY = os.getenv("FOOTBALL_DATA_API_KEY", "")
+API_FOOTBALL_KEY = os.getenv("API_FOOTBALL_KEY", "")
 MODEL_DIR = PROJECT_ROOT / "models"
 
 # ============ 数据库 ============
@@ -709,6 +710,51 @@ def _s_build_features(match, team_idx, h2h_idx, pi_ratings):
     }
 
 
+# 关键球员缺阵对概率的影响（经验值）
+_INJURY_IMPACT = {
+    # 主队缺阵：主胜概率下降，平局上升
+    "home": {"home": -0.04, "draw": +0.025, "away": +0.015},
+    # 客队缺阵：客胜概率下降，平局上升
+    "away": {"home": +0.015, "draw": +0.025, "away": -0.04},
+}
+# 门将缺阵影响更大
+_GK_INJURY_IMPACT = {
+    "home": {"home": -0.05, "draw": +0.03, "away": +0.02},
+    "away": {"home": +0.02, "draw": +0.03, "away": -0.05},
+}
+_GK_KEYWORDS = {"goalkeeper", "keeper", "portero", "torwart", "gardien"}
+
+
+def _s_apply_injury_adjustment(pred: dict, injuries: list, home: str, away: str) -> dict:
+    """根据伤病名单微调预测概率，上限 ±0.12"""
+    delta = {"home": 0.0, "draw": 0.0, "away": 0.0}
+    for inj in injuries:
+        if inj.get("injury_type") != "Missing Fixture":
+            continue  # 只处理确定缺阵，不处理 Questionable
+        team = inj.get("team", "")
+        reason = (inj.get("reason") or "").lower()
+        side = "home" if team == home else ("away" if team == away else None)
+        if not side:
+            continue
+        is_gk = any(kw in reason for kw in _GK_KEYWORDS)
+        impact = _GK_INJURY_IMPACT[side] if is_gk else _INJURY_IMPACT[side]
+        for k in delta:
+            delta[k] += impact[k]
+
+    # 限幅 ±0.12
+    for k in delta:
+        delta[k] = max(-0.12, min(0.12, delta[k]))
+
+    if all(abs(v) < 0.001 for v in delta.values()):
+        return pred
+
+    ph = max(0.01, pred["home"] + delta["home"])
+    pd = max(0.01, pred["draw"] + delta["draw"])
+    pa = max(0.01, pred["away"] + delta["away"])
+    t = ph + pd + pa
+    return {"home": ph / t, "draw": pd / t, "away": pa / t}
+
+
 def _s_smart_blend(pred: dict, features: dict, mw: float = 0.55, db: float = 1.20) -> dict:
     """模型预测与赔率隐含概率混合，动态权重基于 Pi-Ratings 数据量。
     当模型与赔率分歧且模型有信心时，进一步提升模型权重以捕捉冷门。"""
@@ -860,10 +906,31 @@ async def task_run_predictions():
         model_name = 'catboost_v1' if _s_model else 'pi_baseline'
         saved = 0
 
+        # 预加载所有待预测比赛的伤病数据
+        match_ids = [row['id'] for row in matches]
+        injury_map: dict[int, list] = {}
+        if match_ids:
+            async with p.acquire() as conn:
+                inj_rows = await conn.fetch("""
+                    SELECT match_live_id, team, player_name, injury_type, reason
+                    FROM match_injury_context
+                    WHERE match_live_id = ANY($1::int[])
+                """, match_ids)
+            for r in inj_rows:
+                mid = r['match_live_id']
+                injury_map.setdefault(mid, []).append(dict(r))
+
         for row in matches:
             m = dict(row)
             features = _s_build_features(m, team_idx, h2h_idx, pi_ratings)
             pred = _s_predict_proba(features, _s_feature_names)
+
+            # 伤病调整
+            injuries = injury_map.get(m['id'], [])
+            if injuries:
+                home = _s_team_alias.get(m['home_team'], m['home_team'])
+                away = _s_team_alias.get(m['away_team'], m['away_team'])
+                pred = _s_apply_injury_adjustment(pred, injuries, home, away)
             sh, sa, eh, ea = _s_predict_score(features, _s_feature_names, pred)
 
             async with p.acquire() as conn:
@@ -902,6 +969,107 @@ async def task_run_predictions():
         traceback.print_exc()
         print(f"  预测失败: {e}")
         await _log_run('predictions', started, 'error', 0, str(e))
+
+
+
+# ============ 任务：拉取伤病/停赛数据 ============
+
+async def task_fetch_injuries():
+    """每天 13:00：拉取未来 3 天比赛的伤病/停赛数据，存入 match_injury_context"""
+    if not API_FOOTBALL_KEY:
+        print("[injuries] API_FOOTBALL_KEY 未配置，跳过")
+        return
+
+    started = datetime.now()
+    print(f"[{started:%H:%M:%S}] 拉取伤病数据...")
+
+    try:
+        from src.adapters.apifootball_adapter import ApiFootballAdapter, LEAGUE_MAP
+
+        adapter = ApiFootballAdapter(API_FOOTBALL_KEY)
+        p = await get_pool()
+
+        today = date.today()
+        date_to = today + timedelta(days=3)
+
+        # 读取未来 3 天有赔率的比赛
+        async with p.acquire() as conn:
+            matches = await conn.fetch("""
+                SELECT id, date, league, home_team, away_team
+                FROM matches_live
+                WHERE date::date >= $1 AND date::date <= $2
+                  AND status IN ('scheduled', 'pending')
+                  AND odds_home IS NOT NULL
+                ORDER BY date
+            """, today, date_to)
+
+        saved = 0
+        api_calls = 0
+
+        for row in matches:
+            m = dict(row)
+            league_code = _s_league_alias.get(m['league'], m['league'])
+            if league_code not in LEAGUE_MAP:
+                continue  # 只处理支持的联赛
+
+            # 中文名转英文 canonical
+            home_cn = m['home_team']
+            away_cn = m['away_team']
+            home = _s_team_alias.get(home_cn, home_cn)
+            away = _s_team_alias.get(away_cn, away_cn)
+
+            match_date = m['date'].date() if hasattr(m['date'], 'date') else date.fromisoformat(str(m['date'])[:10])
+
+            # 先尝试找 fixture_id（最精确，1次API调用）
+            try:
+                fixture_id = await adapter.find_fixture_id(home, away, match_date, league_code)
+                api_calls += 1
+            except Exception as e:
+                print(f"  find_fixture_id failed for {home} vs {away}: {e}")
+                fixture_id = None
+
+            if fixture_id:
+                try:
+                    injuries = await adapter.get_injuries_for_fixture(fixture_id)
+                    api_calls += 1
+                except Exception as e:
+                    print(f"  get_injuries failed for fixture {fixture_id}: {e}")
+                    injuries = []
+            else:
+                injuries = []
+
+            # 存入 DB
+            for inj in injuries:
+                try:
+                    async with p.acquire() as conn:
+                        await conn.execute("""
+                            INSERT INTO match_injury_context
+                                (match_live_id, team, player_name, injury_type, reason, fixture_date)
+                            VALUES ($1, $2, $3, $4, $5, $6)
+                            ON CONFLICT (match_live_id, team, player_name)
+                            DO UPDATE SET injury_type = EXCLUDED.injury_type,
+                                          reason = EXCLUDED.reason,
+                                          fetched_at = NOW()
+                        """, m['id'], inj['team'], inj['player_name'],
+                            inj['injury_type'], inj['reason'], match_date)
+                        saved += 1
+                except Exception as e:
+                    print(f"  DB insert error: {e}")
+
+            # 免费版 100次/天，保守限速
+            if api_calls >= 80:
+                print(f"  API 调用接近上限 ({api_calls})，停止")
+                break
+
+        duration = (datetime.now() - started).total_seconds()
+        print(f"  伤病数据更新完成：{saved} 条，API 调用 {api_calls} 次，耗时 {duration:.1f}s")
+        await _log_run('injuries', started, 'success', saved)
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        print(f"  伤病数据拉取失败: {e}")
+        await _log_run('injuries', started, 'error', 0, str(e))
 
 
 # ============ 主入口 ============
@@ -948,12 +1116,22 @@ async def main():
         name='Pi-Ratings 更新',
     )
 
+    # 每天 13:00 拉取伤病/停赛数据
+    scheduler.add_job(
+        task_fetch_injuries,
+        CronTrigger(hour=13, minute=0),
+        id='injuries',
+        name='伤病数据拉取',
+        next_run_time=datetime.now(),  # 启动时立即跑一次
+    )
+
     scheduler.start()
     print("调度器已启动：")
     print("  - 实时比分：每 5 分钟")
     print("  - 500.com 赔率：每小时")
     print("  - 预测模型：每小时")
     print("  - Pi-Ratings：每天 07:00")
+    print("  - 伤病数据：每天 13:00")
     print()
 
     try:
