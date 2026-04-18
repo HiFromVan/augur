@@ -36,6 +36,10 @@ export function MatchCard({ match }: MatchCardProps) {
   const predAway = match.pred_away ?? 0;
   const hasValue = match.has_value;
 
+  const maxPred = Math.max(predHome, predDraw, predAway);
+  const predColor = (val: number) =>
+    val === maxPred ? "text-red-500" : val >= maxPred * 0.85 ? "text-red-300" : "text-slate-400";
+
   const homeTeamName = match.home_team_cn || match.home_team;
   const awayTeamName = match.away_team_cn || match.away_team;
   const homeLogo = getTeamLogo(match.home_team);
@@ -138,19 +142,19 @@ export function MatchCard({ match }: MatchCardProps) {
           <div className="flex items-center justify-between gap-4 pt-4 border-t border-border">
             <div className="flex-1 text-center">
               <div className="text-[10px] font-bold text-muted-foreground mb-1">主胜</div>
-              <div className="text-base font-bold" style={{ color: leagueColor }}>
+              <div className={`text-base font-bold ${predColor(predHome)}`}>
                 {Math.round(predHome * 100)}%
               </div>
             </div>
             <div className="flex-1 text-center">
               <div className="text-[10px] font-bold text-muted-foreground mb-1">平局</div>
-              <div className="text-base font-bold text-slate-500">
+              <div className={`text-base font-bold ${predColor(predDraw)}`}>
                 {Math.round(predDraw * 100)}%
               </div>
             </div>
             <div className="flex-1 text-center">
               <div className="text-[10px] font-bold text-muted-foreground mb-1">客胜</div>
-              <div className="text-base font-bold text-rose-500">
+              <div className={`text-base font-bold ${predColor(predAway)}`}>
                 {Math.round(predAway * 100)}%
               </div>
             </div>
