@@ -349,6 +349,17 @@ def build_features(match: dict, all_matches: List[dict]) -> dict:
     away_away = away_matches_recent[:5]
     away_draw_rate = (sum(1 for m in away_away if m['home_goals'] == m['away_goals']) / len(away_away)) if away_away else 0.25
 
+    # 主队近5场主场平局率
+    home_matches_recent = [
+        m for m in all_matches
+        if m['home_team'] == home and m['home_goals'] is not None and m['date'] < match_dt
+    ]
+    home_matches_recent.sort(key=lambda x: x['date'], reverse=True)
+    home_home = home_matches_recent[:5]
+    home_draw_rate = (sum(1 for m in home_home if m['home_goals'] == m['away_goals']) / len(home_home)) if home_home else 0.25
+
+    strength_parity = max(0.0, 1.0 - abs(pi_diff) / 2.0)
+
     # 联赛平局率（从 league_stats_cache 读取）
     league_name = match.get('league', '')
     ls = league_stats_cache.get(league_name) or league_stats_cache.get('__global__') or {}
@@ -375,6 +386,8 @@ def build_features(match: dict, all_matches: List[dict]) -> dict:
         'h2h_avg_goals': h2h_goals,
         'league_draw_rate': league_draw_rate,
         'away_draw_rate_5': away_draw_rate,
+        'home_draw_rate_5': home_draw_rate,
+        'strength_parity': strength_parity,
     }
 
 

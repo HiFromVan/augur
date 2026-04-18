@@ -615,6 +615,16 @@ def _s_away_draw_rate(team, team_idx, match_date, n=5) -> float:
     return draws / len(away_matches)
 
 
+def _s_home_draw_rate(team, team_idx, match_date, n=5) -> float:
+    """主队近n场主场平局率"""
+    all_recent = [m for m in team_idx.get(team, []) if m['date'] < match_date][-(n * 2):]
+    home_matches = [m for m in all_recent if m['home_team'] == team][-n:]
+    if not home_matches:
+        return 0.25
+    draws = sum(1 for m in home_matches if m['home_goals'] == m['away_goals'])
+    return draws / len(home_matches)
+
+
 def _s_h2h(home, away, h2h_idx, match_date, n=10):
     recent = [m for m in h2h_idx.get((home, away), []) if m['date'] < match_date][:n]
     if not recent:
@@ -642,6 +652,8 @@ def _s_build_features(match, team_idx, h2h_idx, pi_ratings):
     aw, a_s, a_c, ap = _s_recent_form(away, team_idx, match_dt)
     h2h_rate, h2h_draw, h2h_goals = _s_h2h(home, away, h2h_idx, match_dt)
     away_draw_rate = _s_away_draw_rate(away, team_idx, match_dt)
+    home_draw_rate = _s_home_draw_rate(home, team_idx, match_dt)
+    strength_parity = max(0.0, 1.0 - abs(pi_diff) / 2.0)
 
     league_raw = match.get('league', 'unknown')
     league = _s_league_alias.get(league_raw, league_raw)
@@ -692,6 +704,8 @@ def _s_build_features(match, team_idx, h2h_idx, pi_ratings):
         'league_avg_total_goals': ls.get('avg_total', 2.54),
         'league_draw_rate': ls.get('draw_rate', 0.25),
         'away_draw_rate_5': away_draw_rate,
+        'home_draw_rate_5': home_draw_rate,
+        'strength_parity': strength_parity,
     }
 
 

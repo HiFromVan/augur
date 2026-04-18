@@ -113,6 +113,19 @@ def _away_draw_rate(team_name: str, match_date, team_index: dict, n=5) -> float:
     return draws / len(away_matches)
 
 
+def _home_draw_rate(team_name: str, match_date, team_index: dict, n=5) -> float:
+    """主队近n场主场平局率"""
+    ms = team_index.get(team_name, [])
+    import bisect
+    dates = [m['date'] for m in ms]
+    idx = bisect.bisect_left(dates, match_date)
+    home_matches = [m for m in ms[max(0, idx - n * 2):idx] if m['home_team'] == team_name][-n:]
+    if not home_matches:
+        return 0.25
+    draws = sum(1 for m in home_matches if m['home_goals'] == m['away_goals'])
+    return draws / len(home_matches)
+
+
 def _h2h(home_t: str, away_t: str, match_date, h2h_index: dict, n=10):
     key = tuple(sorted([home_t, away_t]))
     ms = h2h_index.get(key, [])
@@ -144,9 +157,12 @@ def build_features(match: dict, pi_ratings: dict,
     aw, a_s, a_c, ap = _recent_form(away, match_date, team_index)
     h2h_rate, h2h_draw, h2h_goals = _h2h(home, away, match_date, h2h_index)
     away_draw_rate = _away_draw_rate(away, match_date, team_index)
+    home_draw_rate = _home_draw_rate(home, match_date, team_index)
+    strength_parity = max(0.0, 1.0 - abs(pi_diff) / 2.0)
 
     # 赔率隐含概率（去除水位后）
     implied_home = implied_draw = implied_away = 1/3
+    odds_entropy = 1.0  # 默认最大不确定性
     if match.get('odds_home') and match.get('odds_draw') and match.get('odds_away'):
         ih = 1 / match['odds_home']
         id_ = 1 / match['odds_draw']
@@ -155,6 +171,8 @@ def build_features(match: dict, pi_ratings: dict,
         implied_home = ih / total
         implied_draw = id_ / total
         implied_away = ia / total
+        import math
+        odds_entropy = -sum(p * math.log(p) for p in [implied_home, implied_draw, implied_away] if p > 0) / math.log(3)
 
     return {
         'pi_attack_home': hr['attack'],
@@ -195,6 +213,9 @@ def build_features(match: dict, pi_ratings: dict,
         'league_avg_total_goals': (league_stats or {}).get(match.get('league', ''), {}).get('avg_total') or (league_stats or {}).get('__global__', {}).get('avg_total', 2.54),
         'league_draw_rate': (league_stats or {}).get(match.get('league', ''), {}).get('draw_rate') or (league_stats or {}).get('__global__', {}).get('draw_rate', 0.25),
         'away_draw_rate_5': away_draw_rate,
+        'home_draw_rate_5': home_draw_rate,
+        'strength_parity': strength_parity,
+        'odds_entropy': odds_entropy,
     }
 
 
@@ -492,6 +513,44 @@ async def main():
 
     print(f"\nHome goals model saved to {home_model_path}")
     print(f"Away goals model saved to {away_model_path}")
+
+    # ========== 训练平局二分类器 ==========
+    print("\n" + "=" * 50)
+    print("Training Draw Binary Classifier")
+    print("=" * 50)
+
+    y_draw_train = np.array([1 if label == 1 else 0 for label in y_train])
+    y_draw_test = np.array([1 if label == 1 else 0 for label in y_test])
+
+    draw_train_pool = Pool(X_train_arr, y_draw_train, cat_features=cat_features_cls)
+    draw_test_pool = Pool(X_test_arr, y_draw_test, cat_features=cat_features_cls)
+
+    draw_model = CatBoostClassifier(
+        iterations=500,
+        learning_rate=0.05,
+        depth=6,
+        loss_function='Logloss',
+        eval_metric='AUC',
+        early_stopping_rounds=50,
+        verbose=100,
+        task_type='CPU',
+        class_weights=[1.0, 3.0],  # 平局权重 3x，专注学习平局特征
+    )
+    draw_model.fit(draw_train_pool, eval_set=draw_test_pool)
+
+    draw_preds_test = draw_model.predict_proba(draw_test_pool)[:, 1]
+    draw_auc = float(np.mean([(draw_preds_test[i] > 0.5) == y_draw_test[i] for i in range(len(y_draw_test))]))
+    print(f"\nDraw classifier test accuracy (threshold=0.5): {draw_auc:.2%}")
+
+    # 特征重要性
+    print("\nTop 10 draw classifier feature importances:")
+    draw_importances = draw_model.get_feature_importance()
+    for name, imp in sorted(zip(feature_names, draw_importances), key=lambda x: -x[1])[:10]:
+        print(f"  {name}: {imp:.2f}")
+
+    draw_model_path = os.path.join(MODEL_DIR, "draw_classifier_v1.cbm")
+    draw_model.save_model(draw_model_path)
+    print(f"\nDraw classifier saved to {draw_model_path}")
 
     await db.disconnect()
 
