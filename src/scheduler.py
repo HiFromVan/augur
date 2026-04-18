@@ -710,7 +710,8 @@ def _s_build_features(match, team_idx, h2h_idx, pi_ratings):
 
 
 def _s_smart_blend(pred: dict, features: dict, mw: float = 0.55, db: float = 1.20) -> dict:
-    """模型预测与赔率隐含概率混合，动态权重基于 Pi-Ratings 数据量"""
+    """模型预测与赔率隐含概率混合，动态权重基于 Pi-Ratings 数据量。
+    当模型与赔率分歧且模型有信心时，进一步提升模型权重以捕捉冷门。"""
     ih = features.get('implied_home', 0)
     id_ = features.get('implied_draw', 0)
     ia = features.get('implied_away', 0)
@@ -724,6 +725,13 @@ def _s_smart_blend(pred: dict, features: dict, mw: float = 0.55, db: float = 1.2
         model_weight = 0.3
     else:
         model_weight = mw
+        # 模型与赔率分歧且模型有信心时，进一步提升权重（捕捉冷门）
+        model_top_val = max(pred['home'], pred['draw'], pred['away'])
+        odds_top_val = max(ih, id_, ia)
+        model_winner = max(pred, key=pred.get)
+        odds_winner = 'home' if ih == odds_top_val else ('draw' if id_ == odds_top_val else 'away')
+        if model_winner != odds_winner and model_top_val > 0.48:
+            model_weight = min(0.88, mw + 0.15)
     w = 1 - model_weight
     ph = pred['home'] * model_weight + ih * w
     pd = pred['draw'] * model_weight + id_ * w

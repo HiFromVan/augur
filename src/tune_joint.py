@@ -83,7 +83,15 @@ def smart_blend(pred, features, mw, db):
              abs(features.get("pi_attack_away", 0)) + abs(features.get("pi_defense_away", 0))
     if pi_sum < 0.5: model_weight = 0.0
     elif pi_sum < 2.0: model_weight = 0.3
-    else: model_weight = mw
+    else:
+        model_weight = mw
+        # 模型与赔率分歧且有信心时，提升权重
+        model_top_val = max(pred["home"], pred["draw"], pred["away"])
+        odds_top_val = max(ih, id_, ia)
+        model_winner = max(pred, key=pred.get)
+        odds_winner = "home" if ih == odds_top_val else ("draw" if id_ == odds_top_val else "away")
+        if model_winner != odds_winner and model_top_val > 0.48:
+            model_weight = min(0.88, mw + 0.15)
     w = 1 - model_weight
     ph = pred["home"] * model_weight + ih * w
     pd = pred["draw"] * model_weight + id_ * w
@@ -167,9 +175,9 @@ async def main():
 
     print(f"预计算完成，开始联合搜索...\n")
 
-    model_weights = [0.45, 0.50, 0.55, 0.60, 0.65, 0.70]
-    draw_boosts   = [1.0, 1.05, 1.10, 1.15, 1.20, 1.25, 1.30, 1.35, 1.40]
-    thresholds    = [0.26, 0.27, 0.28, 0.29, 0.30, 0.31, 0.32, 0.33, 0.34, 0.35]
+    model_weights = [0.55, 0.60, 0.65, 0.70, 0.75, 0.80]
+    draw_boosts   = [1.10, 1.15, 1.20, 1.25, 1.30]
+    thresholds    = [0.30, 0.31, 0.32, 0.33, 0.34, 0.35, 0.36, 0.37]
 
     best = {"acc": 0}
     print(f"{'mw':>5} {'db':>5} {'thr':>5} {'acc%':>7} {'draws':>6} {'draw_hit':>9}")
